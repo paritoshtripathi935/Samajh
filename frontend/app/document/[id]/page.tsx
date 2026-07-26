@@ -383,7 +383,7 @@ function downloadMarkdown() {
                     title="Generating English translation"
                     text={
                       englishProgress
-                        ? `Sarvam chat completions is working through chunk ${englishProgress.current} of ${englishProgress.total}.`
+                        ? `Sarvam is working through chunk ${englishProgress.current} of ${englishProgress.total}; final English tokens will appear here as soon as the model emits them.`
                         : 'Sarvam chat completions is preparing page-level chunks.'
                     }
                   />

@@ -38,12 +38,14 @@ import json
 import logging
 import re
 import tempfile
+import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
+import httpx
 from pypdf import PdfReader, PdfWriter
 from sarvamai import SarvamAI
 
@@ -517,7 +519,7 @@ def iter_english_stream_chunks_with_chat(
             emitted = True
             delta_count += 1
             if delta_count == 1:
-                logger.info("sarvam.english_chat.stream.first_delta index=%s chars=%s", index, len(delta))
+                logger.info("sarvam.english_chat.stream.first_content_delta index=%s chars=%s", index, len(delta))
             text_parts.append(delta)
             yield {
                 "type": "delta",
@@ -604,24 +606,111 @@ def _english_chat_completion(chunk: str, *, index: int, total: int, source_langu
 
 
 def _english_chat_completion_stream(chunk: str, *, index: int, total: int, source_language: str) -> Iterator[str]:
-    client = _client()
     logger.info("sarvam.chat.stream.start model=%s chunk_index=%s", CHAT_TRANSLATION_MODEL, index)
     try:
-        stream = client.chat.completions(
+        yield from _chat_completion_stream_http(
             messages=_english_messages(chunk=chunk, index=index, total=total, source_language=source_language),
             model=CHAT_TRANSLATION_MODEL,
             temperature=0.0,
             max_tokens=CHAT_TRANSLATION_MAX_TOKENS,
-            stream=True,
+            chunk_index=index,
         )
-        for chunk_event in stream:
-            content = _stream_delta_content(chunk_event)
-            if content:
-                yield content
     except Exception as exc:  # noqa: BLE001 - normalize SDK exceptions at our boundary
         raise SarvamError(str(exc)) from exc
     finally:
         logger.info("sarvam.chat.stream.done model=%s chunk_index=%s", CHAT_TRANSLATION_MODEL, index)
+
+
+def _chat_completion_stream_http(
+    *,
+    messages: List[Dict[str, str]],
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    chunk_index: int,
+) -> Iterator[str]:
+    """Stream chat completions directly so we control SSE parsing.
+
+    The Sarvam SDK parser currently only accepts `data: ` lines. This parser is
+    deliberately more forgiving and also handles JSONL-style lines.
+    """
+    if not settings.sarvam_api_key:
+        raise SarvamError("SARVAM_API_KEY is not set in the backend environment")
+
+    payload = {
+        "messages": messages,
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": True,
+    }
+    headers = {
+        "api-subscription-key": settings.sarvam_api_key,
+        "content-type": "application/json",
+        "accept": "text/event-stream",
+    }
+    first_line = True
+    saw_reasoning = False
+    saw_content = False
+    stream_started = time.perf_counter()
+    with httpx.stream(
+        "POST",
+        "https://api.sarvam.ai/v1/chat/completions",
+        json=payload,
+        headers=headers,
+        timeout=None,
+    ) as response:
+        if not (200 <= response.status_code < 300):
+            body = response.read().decode("utf-8", errors="replace")
+            raise SarvamError(f"Chat stream failed with {response.status_code}: {body}")
+
+        for line in response.iter_lines():
+            if not line:
+                continue
+            if first_line:
+                logger.info(
+                    "sarvam.chat.stream.first_sse_line chunk_index=%s prefix=%s",
+                    chunk_index,
+                    line[:40],
+                )
+                first_line = False
+            data = _sse_data_from_line(line)
+            if not data:
+                continue
+            if data.strip() == "[DONE]":
+                return
+            try:
+                chunk_event = json.loads(data)
+            except json.JSONDecodeError:
+                logger.debug("sarvam.chat.stream.non_json_line chunk_index=%s line=%s", chunk_index, line[:80])
+                continue
+            content = _stream_delta_content(chunk_event)
+            if content:
+                if not saw_content:
+                    logger.info(
+                        "sarvam.chat.stream.first_content chunk_index=%s elapsed_ms=%.1f",
+                        chunk_index,
+                        (time.perf_counter() - stream_started) * 1000,
+                    )
+                    saw_content = True
+                yield content
+            reasoning = _stream_reasoning_delta_content(chunk_event)
+            if reasoning and not saw_reasoning:
+                logger.info(
+                    "sarvam.chat.stream.first_reasoning chunk_index=%s elapsed_ms=%.1f",
+                    chunk_index,
+                    (time.perf_counter() - stream_started) * 1000,
+                )
+                saw_reasoning = True
+
+
+def _sse_data_from_line(line: str) -> str:
+    stripped = line.strip()
+    if stripped.startswith("data:"):
+        return stripped[len("data:") :].lstrip()
+    if stripped.startswith("{"):
+        return stripped
+    return ""
 
 
 def _stream_delta_content(chunk_event: Any) -> str:
@@ -635,6 +724,27 @@ def _stream_delta_content(chunk_event: Any) -> str:
     choice = choices[0]
     delta = choice.get("delta") if isinstance(choice, dict) else getattr(choice, "delta", None)
     content = delta.get("content") if isinstance(delta, dict) else getattr(delta, "content", None)
+    if not content:
+        message = choice.get("message") if isinstance(choice, dict) else getattr(choice, "message", None)
+        content = message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
+    return str(content) if content else ""
+
+
+def _stream_reasoning_delta_content(chunk_event: Any) -> str:
+    choices = (
+        chunk_event.get("choices")
+        if isinstance(chunk_event, dict)
+        else getattr(chunk_event, "choices", None)
+    )
+    if not choices:
+        return ""
+    choice = choices[0]
+    delta = choice.get("delta") if isinstance(choice, dict) else getattr(choice, "delta", None)
+    content = (
+        delta.get("reasoning_content")
+        if isinstance(delta, dict)
+        else getattr(delta, "reasoning_content", None)
+    )
     return str(content) if content else ""
 
 

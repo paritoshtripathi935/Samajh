@@ -1,4 +1,4 @@
-from app.services.sarvam import CHAT_TRANSLATION_CHUNK_SIZE, english_source_chunks
+from app.services.sarvam import CHAT_TRANSLATION_CHUNK_SIZE, _sse_data_from_line, _stream_delta_content, english_source_chunks
 
 
 def test_english_generation_chunks_use_page_boundaries():
@@ -14,3 +14,9 @@ def test_english_generation_chunks_use_page_boundaries():
     assert "[Page 2]" in chunks[0]
     assert chunks[0].index("[Page 1]") < chunks[0].index("[Page 2]")
     assert len(chunks[0]) <= CHAT_TRANSLATION_CHUNK_SIZE
+
+
+def test_stream_parser_accepts_sse_without_space():
+    assert _sse_data_from_line('data:{"choices":[{"delta":{"content":"Hi"}}]}').startswith('{"choices"')
+    assert _stream_delta_content({"choices": [{"delta": {"content": "Hi"}}]}) == "Hi"
+    assert _stream_delta_content({"choices": [{"delta": {"content": None, "reasoning_content": "hidden"}}]}) == ""
