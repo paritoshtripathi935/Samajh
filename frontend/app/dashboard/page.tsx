@@ -250,7 +250,7 @@ export default function DashboardPage() {
                   Uploaded files
                 </h2>
                 <p style={{ margin: `${t.space.xs} 0 0`, color: t.color.muted, fontSize: t.size.ui }}>
-                  Status is read from the document row and will later include vector and structured ingestion progress.
+                  Ingestion is read from the document row. Chat is available for every uploaded filing.
                 </p>
               </div>
               <div className="mono" style={{ marginLeft: 'auto', color: t.color.dim, fontSize: t.size.micro }}>
@@ -273,8 +273,7 @@ export default function DashboardPage() {
                       <Th>Type</Th>
                       <Th>Pages</Th>
                       <Th>Status</Th>
-                      <Th>Vector</Th>
-                      <Th>Structured</Th>
+                      <Th>Ingestion</Th>
                       <Th>Chat</Th>
                       <Th>Uploaded</Th>
                     </tr>
@@ -293,17 +292,15 @@ export default function DashboardPage() {
                         <Td>{doc.filing_type || 'unknown'}</Td>
                         <Td>{doc.page_count ?? '-'}</Td>
                         <Td><StatusPill status={doc.status} /></Td>
-                        <Td><StatusPill status={doc.vector_ingestion_status ?? 'not started'} /></Td>
-                        <Td><StatusPill status={doc.structured_ingestion_status ?? 'not started'} /></Td>
+                        <Td><StatusPill status={getIngestionStatus(doc)} /></Td>
                         <Td>
                           <button
                             onClick={(event) => {
                               event.stopPropagation();
                               router.push(`/chat/${doc.id}`);
                             }}
-                            disabled={(doc.vector_ingestion_status ?? 'not_started') !== 'ready'}
                             aria-label={`Chat with ${doc.file_name}`}
-                            className="inline-flex items-center cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                            className="inline-flex items-center cursor-pointer"
                             style={{
                               border: `1px solid ${t.color.border}`,
                               borderRadius: t.radius.sm,
@@ -385,6 +382,7 @@ function Td({ children }: { children: React.ReactNode }) {
 }
 
 function StatusPill({ status }: { status: string }) {
+  const normalized = status.replace(/_/g, ' ');
   const isReady = status === 'ready';
   return (
     <span
@@ -402,9 +400,19 @@ function StatusPill({ status }: { status: string }) {
       }}
     >
       {isReady && <CheckCircle2 size={12} />}
-      {status}
+      {normalized}
     </span>
   );
+}
+
+function getIngestionStatus(doc: DocumentListItem) {
+  const vector = doc.vector_ingestion_status ?? 'not_started';
+  const structured = doc.structured_ingestion_status ?? 'not_started';
+  if (vector === 'ready' && structured === 'ready') return 'ready';
+  if (vector === 'failed' || structured === 'failed') return 'failed';
+  if (vector === 'processing' || structured === 'processing') return 'processing';
+  if (vector === 'queued' || structured === 'queued') return 'queued';
+  return 'not_started';
 }
 
 function formatDate(value: string) {
