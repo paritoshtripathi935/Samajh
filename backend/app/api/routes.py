@@ -54,15 +54,17 @@ class ProcessDocumentOut(BaseModel):
 def process_document(
     file: UploadFile = File(...),
     language: str = Form("en-IN"),
-    output_format: str = Form("md"),
 ):
-    """Digitise, translate to English, summarise IPC refs, and persist."""
-    if output_format != "md":
-        raise HTTPException(400, "single process API currently supports output_format=md only")
-    processed = _process_upload(file=file, language=language, output_format=output_format)
+    """Digitise (structured JSON, watermark/chrome removed), translate to
+    English, summarise IPC refs, and persist (with block coords + confidence)."""
+    processed, pages, job_id = _digitise_and_summarise(file=file, language=language)
     processed.filing_type = extraction.detect_filing_type(processed.raw_extraction)
     processed.document_id = _persist_process(
-        file_name=file.filename or "upload.pdf", language=language, processed=processed
+        file_name=file.filename or "upload.pdf",
+        language=language,
+        processed=processed,
+        pages=pages,
+        job_id=job_id,
     )
     return processed
 
@@ -94,7 +96,7 @@ def upload_document(
     if store.get_case(case_id) is None:
         raise HTTPException(404, "case not found")
 
-    processed = _process_upload(file=file, language=language, output_format=output_format)
+    processed, _pages, _job_id = _digitise_and_summarise(file=file, language=language)
     raw_text = processed.raw_extraction
 
     filing_type = extraction.detect_filing_type(raw_text)
@@ -170,22 +172,30 @@ def _find_doc(case_id: str, document_id: str):
     raise HTTPException(404, "document not found")
 
 
-def _process_upload(file: UploadFile, language: str, output_format: str) -> ProcessDocumentOut:
+def _digitise_and_summarise(file: UploadFile, language: str):
+    """Digitise to structured JSON, rebuild clean text (no watermark/base64),
+    translate, and summarise IPC. Returns (ProcessDocumentOut, pages, job_id)."""
     suffix = Path(file.filename or "upload.pdf").suffix or ".pdf"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(file.file.read())
         tmp_path = tmp.name
 
     try:
-        result = sarvam.digitise(tmp_path, language=language, output_format=output_format)
-        raw_extraction = result.raw_text
-        eng_extraction = sarvam.translate_to_english(raw_extraction, source_language_code=language)
-        ipc_sections = _summarize_ipc_sections(raw_extraction)
-        return ProcessDocumentOut(
-            raw_extraction=raw_extraction,
+        # DI job accepts md/html only; the bundle also ships per-page layout
+        # JSON (blocks w/ bbox + confidence), which digitise() returns as pages.
+        result = sarvam.digitise(tmp_path, language=language, output_format="md")
+        pages = result.content if isinstance(result.content, list) else []
+        clean_md = (
+            sarvam.blocks_to_markdown(pages) if pages else sarvam.strip_data_uris(result.raw_text)
+        )
+        eng_extraction = sarvam.translate_to_english(clean_md, source_language_code=language)
+        ipc_sections = _summarize_ipc_sections(clean_md)
+        processed = ProcessDocumentOut(
+            raw_extraction=clean_md,
             eng_extraction=eng_extraction,
             ipc_sections=ipc_sections,
         )
+        return processed, pages, str(result.job_id)
     except sarvam.SarvamError as e:
         raise HTTPException(502, f"Sarvam request failed: {e}")
     finally:
@@ -207,18 +217,31 @@ def _section_sort_key(section: str) -> tuple[int, str]:
     return (int(numeric or 0), suffix)
 
 
-def _persist_process(*, file_name: str, language: str, processed: ProcessDocumentOut) -> Optional[str]:
+def _persist_process(
+    *,
+    file_name: str,
+    language: str,
+    processed: ProcessDocumentOut,
+    pages: Optional[list] = None,
+    job_id: Optional[str] = None,
+) -> Optional[str]:
     """Best-effort: persist the processed result to Supabase. Never fail the
-    request on a DB error — the MVP demo must still return its result."""
+    request on a DB error — the MVP demo must still return its result.
+    `content` = clean text; `content_json` = DI blocks (bbox + confidence)."""
     try:
         doc = repo.insert_document(
             file_name=file_name,
             filing_type=processed.filing_type or "unknown",
             source_language=language,
+            page_count=len(pages) if pages else None,
             status="ready",
         )
         repo.insert_digitization(
-            document_id=doc["id"], output_format="md", content=processed.raw_extraction
+            document_id=doc["id"],
+            output_format="json",
+            content=processed.raw_extraction,
+            content_json=pages or None,
+            sarvam_job_id=job_id,
         )
         if processed.eng_extraction:
             repo.insert_translation(

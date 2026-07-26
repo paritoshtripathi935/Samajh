@@ -126,14 +126,7 @@ def _digitise_single(
     out_dir = tempfile.mkdtemp(prefix="samajh_di_")
     out_zip = str(Path(out_dir) / "output.zip")
     written = job.download_output(out_zip)
-    raw_text, files = _read_output(written or out_zip, out_dir)
-
-    content: Any = raw_text
-    if output_format == "json":
-        try:
-            content = json.loads(raw_text)
-        except json.JSONDecodeError:
-            pass  # leave as raw text; caller can inspect
+    raw_text, pages, files = _read_output(written or out_zip, out_dir)
 
     metrics = None
     try:
@@ -144,8 +137,8 @@ def _digitise_single(
     return DigitiseResult(
         job_id=str(job.job_id),
         output_format=output_format,
-        content=content,
-        raw_text=raw_text,
+        content=pages,       # structured layout blocks (bbox/confidence/order)
+        raw_text=raw_text,   # rendered md/html — JSON kept out of it
         output_files=files,
         page_metrics=metrics,
     )
@@ -188,6 +181,18 @@ def _merge_digitise_results(results: List[DigitiseResult]) -> DigitiseResult:
 
     raw_text = "\n\n".join(result.raw_text for result in results if result.raw_text)
     output_files = [file for result in results for file in result.output_files]
+
+    merged_pages: List[Dict[str, Any]] = []
+    offset = 0
+    for result in results:
+        pages = result.content if isinstance(result.content, list) else []
+        for page in pages:
+            page = dict(page)
+            if isinstance(page.get("page_num"), int):
+                page["page_num"] += offset
+            merged_pages.append(page)
+        offset += len(pages)
+
     page_metrics = {
         "batches": [
             {
@@ -201,29 +206,50 @@ def _merge_digitise_results(results: List[DigitiseResult]) -> DigitiseResult:
     return DigitiseResult(
         job_id=",".join(result.job_id for result in results),
         output_format=results[0].output_format,
-        content=raw_text,
+        content=merged_pages,
         raw_text=raw_text,
         output_files=output_files,
         page_metrics=page_metrics,
     )
 
 
-def _read_output(written: str, fallback_dir: str) -> Tuple[str, List[str]]:
-    """download_output may return a file path or a directory. Read either."""
+def _read_output(written: str, fallback_dir: str) -> Tuple[str, List[Dict[str, Any]], List[str]]:
+    """The DI download bundle holds the rendered text (document.md/.html) AND a
+    per-page layout file (page_NNN.json — blocks with bbox/confidence/reading
+    order). Return them SEPARATELY so the JSON never leaks into the text:
+    (rendered_text, pages, all_files)."""
     p = Path(written) if written else Path(fallback_dir)
     if p.is_file() and zipfile.is_zipfile(p):
         extract_dir = Path(fallback_dir) / "extracted"
         with zipfile.ZipFile(p, "r") as archive:
             archive.extractall(extract_dir)
-        files = sorted(f for f in extract_dir.glob("**/*") if f.is_file())
-        texts = [f.read_text(encoding="utf-8", errors="replace") for f in files]
-        return "\n\n".join(texts), [str(f) for f in files]
-    if p.is_file():
-        return p.read_text(encoding="utf-8", errors="replace"), [str(p)]
-    # directory: concatenate every output file (usually one)
-    files = sorted(f for f in p.glob("**/*") if f.is_file())
-    texts = [f.read_text(encoding="utf-8", errors="replace") for f in files]
-    return "\n\n".join(texts), [str(f) for f in files]
+        candidates = sorted(f for f in extract_dir.glob("**/*") if f.is_file())
+    elif p.is_file():
+        candidates = [p]
+    else:
+        candidates = sorted(f for f in p.glob("**/*") if f.is_file())
+
+    text_parts: List[str] = []
+    pages: List[Dict[str, Any]] = []
+    for f in candidates:
+        suffix = f.suffix.lower()
+        if suffix == ".json":
+            try:
+                blob = f.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for obj in _iter_json_objects(blob):
+                if isinstance(obj, list):
+                    pages.extend(x for x in obj if isinstance(x, dict))
+                elif isinstance(obj, dict):
+                    if isinstance(obj.get("pages"), list):
+                        pages.extend(x for x in obj["pages"] if isinstance(x, dict))
+                    else:
+                        pages.append(obj)
+        elif suffix in (".md", ".markdown", ".html", ".htm", ".txt", ""):
+            text_parts.append(f.read_text(encoding="utf-8", errors="replace"))
+    pages.sort(key=lambda pg: pg.get("page_num") or 0)
+    return "\n\n".join(text_parts), pages, [str(f) for f in candidates]
 
 
 # ── Chat (grounded answers over digitised text) ─────────────────────────────
@@ -273,6 +299,70 @@ def strip_data_uris(md: str) -> str:
     md = _DATA_URI_IMG_RE.sub("", md)
     md = _BARE_DATA_URI_RE.sub("", md)
     return md
+
+
+# ── DI JSON blocks → clean text (drops watermarks / page chrome) ────────────
+#
+# The `json` output_format returns per-page blocks, each with coordinates
+# (bbox), layout_tag, confidence, reading_order and text. We drop document
+# chrome (headers/footers/page numbers/watermark images) and known watermark
+# text, keep everything else in reading order. The full blocks are preserved
+# separately (content_json) for jump-to-source + confidence flags.
+
+_HEADING_TAGS = {"headline", "title", "section-header", "section_header"}
+_NOISE_TAGS = {"header", "footer", "footnote", "page-number", "page_number", "image", "watermark"}
+_NOISE_TEXT = [
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"studocu",
+        r"downloaded by\b.*@",
+        r"scan to open",
+        r"this document is available on",
+        r"not sponsored or endorsed",
+    )
+]
+
+
+def _iter_json_objects(text: str):
+    """Yield JSON values from text that is either one JSON doc, a JSON array,
+    or several concatenated / newline-delimited objects."""
+    text = text.strip()
+    if not text:
+        return
+    try:
+        yield json.loads(text)
+        return
+    except json.JSONDecodeError:
+        pass
+    decoder = json.JSONDecoder()
+    idx, n = 0, len(text)
+    while idx < n:
+        while idx < n and text[idx] in " \t\r\n":
+            idx += 1
+        if idx >= n:
+            break
+        try:
+            obj, end = decoder.raw_decode(text, idx)
+        except json.JSONDecodeError:
+            break
+        yield obj
+        idx = end
+
+
+def blocks_to_markdown(pages: List[Dict[str, Any]], drop_noise: bool = True) -> str:
+    """Reconstruct clean Markdown from DI page blocks, in reading order."""
+    out: List[str] = []
+    for page in sorted(pages, key=lambda p: p.get("page_num") or 0):
+        blocks = page.get("blocks") or []
+        for b in sorted(blocks, key=lambda x: x.get("reading_order") or 0):
+            tag = str(b.get("layout_tag") or "").lower()
+            text = str(b.get("text") or "").strip()
+            if not text:
+                continue
+            if drop_noise and (tag in _NOISE_TAGS or any(p.search(text) for p in _NOISE_TEXT)):
+                continue
+            out.append(f"## {text}" if tag in _HEADING_TAGS else text)
+    return "\n\n".join(out)
 
 
 def translate_to_english(input_text: str, source_language_code: str) -> str:
