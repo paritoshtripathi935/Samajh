@@ -496,7 +496,7 @@ def chat_with_document(document_id: str, body: DocumentChatIn):
             document_id=document_id,
             role="assistant",
             content=answer,
-            model=sarvam.CHAT_MODEL,
+            model=sarvam.DOCUMENT_CHAT_MODEL,
         )
     except sarvam.SarvamError as exc:
         logger.exception("document.chat.sarvam_error document_id=%s", document_id)
@@ -819,7 +819,7 @@ def _answer_document_question(
     )
     return sarvam.chat(
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        model=sarvam.CHAT_MODEL,
+        model=sarvam.DOCUMENT_CHAT_MODEL,
         temperature=0.1,
         max_tokens=1600,
     )

@@ -51,7 +51,8 @@ from sarvamai import SarvamAI
 
 from app.core.settings import settings
 
-CHAT_MODEL = "sarvam-30b"          # sarvam-105b for the heavier model
+CHAT_MODEL = "sarvam-30b"          # default lightweight chat/fallback model
+DOCUMENT_CHAT_MODEL = "sarvam-105b"
 IPC_SUMMARY_MODEL = "sarvam-105b"
 RESEARCH_SEARCH_MODEL = "sarvam-105b"
 CHAT_TRANSLATION_MODEL = "sarvam-105b"
