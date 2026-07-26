@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type React from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
@@ -72,6 +72,8 @@ export default function DocumentPage() {
   const [tab, setTab] = useState<ExtractionTab>('english');
   const [englishLoading, setEnglishLoading] = useState(false);
   const [englishError, setEnglishError] = useState<string | null>(null);
+  const [englishProgress, setEnglishProgress] = useState<{ current: number; total: number } | null>(null);
+  const englishStartedForRef = useRef<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -108,39 +110,72 @@ export default function DocumentPage() {
 
   useEffect(() => {
     let alive = true;
+    const controller = new AbortController();
+
     async function runEnglish() {
-      if (!view || view.english || englishLoading) return;
+      if (!view || view.english) return;
+      const runKey = `${view.documentId ?? view.fileName}:${view.original.length}:${view.pages.length}`;
+      if (englishStartedForRef.current === runKey) return;
+      englishStartedForRef.current = runKey;
+
       setEnglishLoading(true);
       setEnglishError(null);
+      setEnglishProgress(null);
+      const parts: string[] = [];
       try {
-        const result = await api.generateEnglish({
-          raw_extraction: view.original,
-          pages: view.pages,
-          document_id: view.documentId,
-          source_language: view.sourceLanguage,
-        });
+        let finalEnglish = '';
+        await api.streamEnglish(
+          {
+            raw_extraction: view.original,
+            pages: view.pages,
+            document_id: view.documentId,
+            source_language: view.sourceLanguage,
+          },
+          (event) => {
+            if (!alive) return;
+            if (event.type === 'start') {
+              setEnglishProgress({ current: 0, total: event.chunks });
+              return;
+            }
+            if (event.type === 'chunk') {
+              parts[event.index - 1] = event.text;
+              const stitched = parts.filter(Boolean).join('\n\n');
+              setEnglishProgress({ current: event.index, total: event.total });
+              setView((current) => (current ? { ...current, english: stitched } : current));
+              return;
+            }
+            if (event.type === 'done') {
+              finalEnglish = event.eng_extraction;
+              setView((current) => (current ? { ...current, english: event.eng_extraction } : current));
+            }
+          },
+          { signal: controller.signal },
+        );
         if (!alive) return;
-        setView((current) => (current ? { ...current, english: result.eng_extraction } : current));
         try {
           const raw = sessionStorage.getItem('samajh:lastResult');
           if (raw) {
             const parsed = JSON.parse(raw);
-            sessionStorage.setItem('samajh:lastResult', JSON.stringify({ ...parsed, eng_extraction: result.eng_extraction }));
+            sessionStorage.setItem('samajh:lastResult', JSON.stringify({ ...parsed, eng_extraction: finalEnglish }));
           }
         } catch {
           /* ignore */
         }
       } catch (err) {
-        if (alive) setEnglishError(err instanceof Error ? err.message : String(err));
+        if (alive && !controller.signal.aborted) setEnglishError(err instanceof Error ? err.message : String(err));
       } finally {
-        if (alive) setEnglishLoading(false);
+        if (alive) {
+          setEnglishLoading(false);
+          setEnglishProgress(null);
+        }
       }
     }
     runEnglish();
     return () => {
       alive = false;
+      controller.abort();
     };
-  }, [view, englishLoading]);
+  }, [view?.documentId, view?.fileName, view?.original, view?.pages.length, view?.sourceLanguage]);
 
   const activeText = tab === 'raw' ? view?.original ?? '' : view?.english ?? '';
   const stats = useMemo(() => {
@@ -275,12 +310,34 @@ function downloadMarkdown() {
                   padding: t.space.lg,
                 }}
               >
-                {tab === 'english' && englishLoading ? (
-                  <Empty title="Generating English translation" text="Sarvam chat completions is working through the document in page-level chunks." />
-                ) : tab === 'english' && englishError ? (
+                {tab === 'english' && englishError ? (
                   <Empty title="English generation failed" text={englishError} />
                 ) : activeText ? (
-                  <Markdown>{activeText}</Markdown>
+                  <>
+                    {tab === 'english' && englishLoading && (
+                      <div
+                        className="mono"
+                        style={{
+                          color: t.color.dim,
+                          fontSize: t.size.micro,
+                          marginBottom: t.space.md,
+                          textTransform: 'uppercase',
+                        }}
+                      >
+                        Streaming English {englishProgress ? `${englishProgress.current}/${englishProgress.total}` : ''}
+                      </div>
+                    )}
+                    <Markdown>{activeText}</Markdown>
+                  </>
+                ) : tab === 'english' && englishLoading ? (
+                  <Empty
+                    title="Generating English translation"
+                    text={
+                      englishProgress
+                        ? `Sarvam chat completions is working through chunk ${englishProgress.current} of ${englishProgress.total}.`
+                        : 'Sarvam chat completions is preparing page-level chunks.'
+                    }
+                  />
                 ) : (
                   <Empty title="No extraction" text="This response did not include text for this tab." />
                 )}

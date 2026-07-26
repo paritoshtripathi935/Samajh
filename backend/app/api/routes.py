@@ -13,10 +13,12 @@ from __future__ import annotations
 import logging
 import tempfile
 import time
+import json
 from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app import repositories as repo
@@ -113,19 +115,7 @@ def generate_english(body: EnglishExtractionIn):
         len(body.pages or []),
     )
 
-    source_text = body.raw_extraction or ""
-    pages = body.pages
-    if body.document_id and not source_text and pages is None:
-        bundle = repo.get_document_bundle(body.document_id)
-        if not bundle:
-            raise HTTPException(404, "document not found")
-        digitization = bundle["digitizations"][0] if bundle.get("digitizations") else {}
-        source_text = digitization.get("content") or ""
-        content_json = digitization.get("content_json")
-        pages = content_json if isinstance(content_json, list) else None
-
-    if not source_text.strip() and not pages:
-        raise HTTPException(400, "raw_extraction or pages is required")
+    source_text, pages = _resolve_english_source(body)
 
     try:
         english = sarvam.generate_english_with_chat(
@@ -157,6 +147,97 @@ def generate_english(body: EnglishExtractionIn):
         (time.perf_counter() - start) * 1000,
     )
     return EnglishExtractionOut(eng_extraction=english, document_id=body.document_id)
+
+
+@router.post("/documents/english/stream")
+def stream_english(body: EnglishExtractionIn):
+    """Stream English Markdown as newline-delimited JSON chunks.
+
+    Each `chunk` event is a completed Sarvam chat-completion chunk, not token
+    streaming. The final `done` event includes the stitched Markdown.
+    """
+    start = time.perf_counter()
+    logger.info(
+        "document.english_stream.start document_id=%s source_language=%s raw_chars=%s pages=%s",
+        body.document_id,
+        body.source_language,
+        len(body.raw_extraction or ""),
+        len(body.pages or []),
+    )
+    source_text, pages = _resolve_english_source(body)
+
+    def events():
+        translated: list[str] = []
+        try:
+            first = True
+            for chunk in sarvam.iter_english_with_chat(
+                raw_text=source_text,
+                pages=pages,
+                source_language=body.source_language,
+            ):
+                if first:
+                    yield _json_line(
+                        {
+                            "type": "start",
+                            "document_id": body.document_id,
+                            "chunks": chunk["total"],
+                            "model": sarvam.CHAT_TRANSLATION_MODEL,
+                        }
+                    )
+                    first = False
+                text = str(chunk["text"])
+                translated.append(text)
+                yield _json_line(
+                    {
+                        "type": "chunk",
+                        "index": chunk["index"],
+                        "total": chunk["total"],
+                        "text": text,
+                    }
+                )
+
+            english = "\n\n".join(part.strip() for part in translated if part.strip())
+            if not translated:
+                yield _json_line(
+                    {
+                        "type": "start",
+                        "document_id": body.document_id,
+                        "chunks": 0,
+                        "model": sarvam.CHAT_TRANSLATION_MODEL,
+                    }
+                )
+
+            if body.document_id and english:
+                try:
+                    repo.insert_translation(
+                        document_id=body.document_id,
+                        target_language="en-IN",
+                        source_language=body.source_language,
+                        translated_text=english,
+                        model=sarvam.CHAT_TRANSLATION_MODEL,
+                    )
+                    logger.info("document.english_stream.persist.done document_id=%s", body.document_id)
+                except Exception as exc:  # noqa: BLE001 - translation persistence is best-effort
+                    logger.warning("English stream persistence failed (continuing): %s", exc)
+
+            logger.info(
+                "document.english_stream.done document_id=%s english_chars=%s elapsed_ms=%.1f",
+                body.document_id,
+                len(english),
+                (time.perf_counter() - start) * 1000,
+            )
+            yield _json_line(
+                {
+                    "type": "done",
+                    "document_id": body.document_id,
+                    "eng_extraction": english,
+                }
+            )
+        except sarvam.SarvamError as exc:
+            logger.exception("document.english_stream.sarvam_error document_id=%s", body.document_id)
+            yield _json_line({"type": "error", "message": f"Sarvam chat completion failed: {exc}"})
+
+    return StreamingResponse(events(), media_type="application/x-ndjson")
 
 
 @router.get("/documents/{document_id}")
@@ -263,6 +344,27 @@ def _find_doc(case_id: str, document_id: str):
         if d["id"] == document_id:
             return d
     raise HTTPException(404, "document not found")
+
+
+def _resolve_english_source(body: EnglishExtractionIn) -> tuple[str, Optional[list[dict[str, Any]]]]:
+    source_text = body.raw_extraction or ""
+    pages = body.pages
+    if body.document_id and not source_text and pages is None:
+        bundle = repo.get_document_bundle(body.document_id)
+        if not bundle:
+            raise HTTPException(404, "document not found")
+        digitization = bundle["digitizations"][0] if bundle.get("digitizations") else {}
+        source_text = digitization.get("content") or ""
+        content_json = digitization.get("content_json")
+        pages = content_json if isinstance(content_json, list) else None
+
+    if not source_text.strip() and not pages:
+        raise HTTPException(400, "raw_extraction or pages is required")
+    return source_text, pages
+
+
+def _json_line(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False) + "\n"
 
 
 def _digitise_and_summarise(file: UploadFile, language: str):

@@ -2,7 +2,7 @@
  * Client for the Samajh Python backend (FastAPI).
  *
  * The MVP flow is `processDocument` → raw extraction + coordinates, then
- * `generateEnglish` → English Markdown via chat completions. The backend owns
+ * `streamEnglish` → English Markdown via chat completions. The backend owns
  * Sarvam + Supabase; the browser never holds the Sarvam key. Point at it with
  * NEXT_PUBLIC_BACKEND_URL (default http://localhost:8000).
  */
@@ -89,6 +89,19 @@ export interface EnglishResult {
   document_id: string | null;
 }
 
+export type EnglishStreamEvent =
+  | { type: 'start'; chunks: number; document_id: string | null; model?: string }
+  | { type: 'chunk'; index: number; total: number; text: string }
+  | { type: 'done'; document_id: string | null; eng_extraction: string }
+  | { type: 'error'; message: string };
+
+type EnglishRequest = {
+  raw_extraction?: string;
+  pages?: LayoutPage[] | null;
+  document_id?: string | null;
+  source_language?: string;
+};
+
 export interface DocumentBundle {
   document: {
     id: string;
@@ -136,16 +149,58 @@ export const api = {
   },
 
   /** MVP step 2: generate English Markdown via Sarvam chat completions. */
-  generateEnglish: (body: {
-    raw_extraction?: string;
-    pages?: LayoutPage[] | null;
-    document_id?: string | null;
-    source_language?: string;
-  }) =>
+  generateEnglish: (body: EnglishRequest) =>
     request<EnglishResult>(`/api/documents/english`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+
+  /** MVP step 2, streamed chunk-by-chunk as NDJSON. */
+  streamEnglish: async (
+    body: EnglishRequest,
+    onEvent: (event: EnglishStreamEvent) => void,
+    opts?: { signal?: AbortSignal },
+  ) => {
+    const res = await fetch(`${BASE}/api/documents/english/stream`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+      signal: opts?.signal,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      const parsed = text ? safeJson(text) : undefined;
+      const detail =
+        parsed && typeof parsed === 'object' && 'detail' in parsed
+          ? String((parsed as { detail: unknown }).detail)
+          : '';
+      throw new ApiError(
+        `POST /api/documents/english/stream → ${res.status}${detail ? `: ${detail}` : ''}`,
+        res.status,
+        parsed,
+      );
+    }
+    if (!res.body) throw new ApiError('Streaming response was empty', res.status);
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const event = JSON.parse(line) as EnglishStreamEvent;
+        onEvent(event);
+        if (event.type === 'error') throw new ApiError(event.message, 502, event);
+      }
+      if (done) break;
+    }
+    if (buffer.trim()) onEvent(JSON.parse(buffer) as EnglishStreamEvent);
+  },
 
   /** The persisted document + its digitizations / extractions / translations. */
   getDocument: (documentId: string) => request<DocumentBundle>(`/api/documents/${documentId}`),

@@ -42,7 +42,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from pypdf import PdfReader, PdfWriter
 from sarvamai import SarvamAI
@@ -428,9 +428,31 @@ def generate_english_with_chat(
 ) -> str:
     """Generate English Markdown using chat completions, not Sarvam Translate.
     Prefer page-level chunks so long filings stay inside context limits."""
+    translated = [
+        result["text"]
+        for result in iter_english_with_chat(
+            raw_text=raw_text,
+            pages=pages,
+            source_language=source_language,
+        )
+    ]
+    return "\n\n".join(part.strip() for part in translated if part.strip())
+
+
+def iter_english_with_chat(
+    *,
+    raw_text: str,
+    pages: Optional[List[Dict[str, Any]]] = None,
+    source_language: str = "auto",
+) -> Iterator[Dict[str, Any]]:
+    """Yield completed English Markdown chunks in document order.
+
+    This is chunk-level streaming: each Sarvam chat completion returns a full
+    page-packed chunk, then the API can immediately flush it to the browser.
+    """
     chunks = _english_source_chunks(raw_text=raw_text, pages=pages)
     if not chunks:
-        return ""
+        return
 
     logger.info(
         "sarvam.english_chat.chunked chunks=%s raw_chars=%s pages=%s",
@@ -438,12 +460,20 @@ def generate_english_with_chat(
         len(raw_text),
         len(pages or []),
     )
-    translated: list[str] = []
     for index, chunk in enumerate(chunks, start=1):
         logger.info("sarvam.english_chat.chunk.start index=%s chars=%s", index, len(chunk))
-        translated.append(_english_chat_completion_with_fallback(chunk, index=index, total=len(chunks), source_language=source_language))
-        logger.info("sarvam.english_chat.chunk.done index=%s output_chars=%s", index, len(translated[-1]))
-    return "\n\n".join(part.strip() for part in translated if part.strip())
+        text = _english_chat_completion_with_fallback(
+            chunk,
+            index=index,
+            total=len(chunks),
+            source_language=source_language,
+        )
+        logger.info("sarvam.english_chat.chunk.done index=%s output_chars=%s", index, len(text))
+        yield {
+            "index": index,
+            "total": len(chunks),
+            "text": text,
+        }
 
 
 def _english_source_chunks(
