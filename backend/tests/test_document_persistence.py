@@ -113,3 +113,58 @@ def test_list_documents_returns_dashboard_rows(monkeypatch):
     assert len(response.documents) == 1
     assert response.documents[0].id == "doc-4"
     assert response.documents[0].status == "ready"
+
+
+def test_mark_document_ingested_updates_statuses(monkeypatch):
+    calls = {}
+
+    monkeypatch.setattr(routes.repo, "get_document", lambda document_id: {"id": document_id})
+    monkeypatch.setattr(
+        routes.repo,
+        "update_document_ingestion_status",
+        lambda **kwargs: calls.update(kwargs) or {},
+    )
+
+    response = routes.mark_document_ingested("doc-5")
+
+    assert response.document_id == "doc-5"
+    assert response.vector_ingestion_status == "ready"
+    assert response.structured_ingestion_status == "ready"
+    assert calls["document_id"] == "doc-5"
+    assert calls["vector_status"] == "ready"
+
+
+def test_chat_with_document_persists_user_and_assistant(monkeypatch):
+    calls = {"messages": []}
+
+    monkeypatch.setattr(
+        routes.repo,
+        "get_document_bundle",
+        lambda document_id: {
+            "document": {"id": document_id, "file_name": "filing.pdf"},
+            "translations": [{"translated_text": "English filing context with Section 420 IPC."}],
+            "digitizations": [],
+        },
+    )
+    monkeypatch.setattr(
+        routes.repo,
+        "create_document_conversation",
+        lambda **kwargs: {"id": "convo-1", "document_id": kwargs["document_id"], "title": kwargs["title"]},
+    )
+    monkeypatch.setattr(routes.repo, "list_document_chat_messages", lambda conversation_id, limit=50: [])
+    monkeypatch.setattr(
+        routes.repo,
+        "insert_document_chat_message",
+        lambda **kwargs: calls["messages"].append(kwargs) or {"id": f"msg-{len(calls['messages'])}", **kwargs},
+    )
+    monkeypatch.setattr(routes, "_answer_document_question", lambda **kwargs: "Grounded answer")
+
+    response = routes.chat_with_document(
+        "doc-6",
+        routes.DocumentChatIn(message="What is alleged?"),
+    )
+
+    assert response.conversation_id == "convo-1"
+    assert response.answer == "Grounded answer"
+    assert calls["messages"][0]["role"] == "user"
+    assert calls["messages"][1]["role"] == "assistant"

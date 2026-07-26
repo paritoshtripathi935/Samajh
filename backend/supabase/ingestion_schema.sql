@@ -80,8 +80,39 @@ create table if not exists public.chargesheet_structured_extractions (
 create index if not exists chargesheet_structured_extractions_document_id_idx
   on public.chargesheet_structured_extractions(document_id);
 
+create table if not exists public.document_conversations (
+  id uuid primary key default gen_random_uuid(),
+  document_id uuid not null references public.documents(id) on delete cascade,
+  title text not null default 'Document chat',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists document_conversations_document_id_idx
+  on public.document_conversations(document_id);
+
+create table if not exists public.document_chat_messages (
+  id uuid primary key default gen_random_uuid(),
+  conversation_id uuid not null references public.document_conversations(id) on delete cascade,
+  document_id uuid not null references public.documents(id) on delete cascade,
+  role text not null check (role in ('user', 'assistant', 'system')),
+  content text not null,
+  model text,
+  metadata jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists document_chat_messages_conversation_id_idx
+  on public.document_chat_messages(conversation_id, created_at);
+
 comment on table public.document_vector_chunks is
   'Document-level vector chunks for RAG over raw/English legal filing text.';
 
 comment on table public.chargesheet_structured_extractions is
   'Structured chargesheet facts extracted from English translation for future lawyer-agent workflows.';
+
+comment on table public.document_conversations is
+  'Per-document chat threads for lawyer questions over a filing.';
+
+comment on table public.document_chat_messages is
+  'Persisted user and assistant turns for document-grounded chat.';

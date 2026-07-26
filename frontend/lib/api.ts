@@ -172,6 +172,21 @@ export interface DocumentListItem {
   updated_at: string | null;
 }
 
+export interface DocumentConversation {
+  id: string;
+  document_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string | null;
+}
+
+export interface DocumentChatMessage {
+  id?: string | null;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  created_at?: string | null;
+}
+
 export const api = {
   health: () => request<{ status: string }>(`/health`),
 
@@ -255,6 +270,33 @@ export const api = {
   /** Recent uploaded filings for the dashboard. */
   listDocuments: (opts?: { limit?: number }) =>
     request<{ documents: DocumentListItem[] }>(`/api/documents?limit=${opts?.limit ?? 50}`),
+
+  /** Mark MVP ingestion ready for chat after review submit. */
+  markDocumentIngested: (documentId: string) =>
+    request<{
+      document_id: string;
+      vector_ingestion_status: string;
+      structured_ingestion_status: string;
+    }>(`/api/documents/${documentId}/ingest`, { method: 'POST' }),
+
+  /** Conversation history for document chat. */
+  listDocumentConversations: (documentId: string) =>
+    request<{ conversations: DocumentConversation[] }>(`/api/documents/${documentId}/conversations`),
+
+  listConversationMessages: (conversationId: string) =>
+    request<{ messages: DocumentChatMessage[] }>(`/api/conversations/${conversationId}/messages`),
+
+  chatWithDocument: (
+    documentId: string,
+    body: { message: string; conversation_id?: string | null },
+  ) =>
+    request<{ conversation_id: string; answer: string; messages: DocumentChatMessage[] }>(
+      `/api/documents/${documentId}/chat`,
+      {
+        method: 'POST',
+        body: JSON.stringify(body),
+      },
+    ),
 
   /** Backend-served URL for the original PDF in private Supabase Storage. */
   documentPdfUrl: (documentId: string) => `${BASE}/api/documents/${documentId}/pdf`,

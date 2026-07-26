@@ -59,6 +59,21 @@ def list_documents(limit: int = 50) -> List[Dict[str, Any]]:
     return res.data or []
 
 
+def update_document_ingestion_status(
+    *,
+    document_id: str,
+    vector_status: str,
+    structured_status: str,
+    last_ingested_at: str,
+) -> Dict[str, Any]:
+    return update_document(
+        document_id,
+        vector_ingestion_status=vector_status,
+        structured_ingestion_status=structured_status,
+        last_ingested_at=last_ingested_at,
+    )
+
+
 def upload_document_file(*, document_id: str, file_name: str, content: bytes) -> str:
     """Upload an original filing and return its stable Storage object path."""
     safe_name = file_name.replace("\\", "_").replace("/", "_") or "document.pdf"
@@ -154,3 +169,67 @@ def get_document_bundle(document_id: str) -> Optional[Dict[str, Any]]:
     exts = sb.table("extractions").select("*").eq("document_id", document_id).order("created_at", desc=True).execute().data
     trans = sb.table("translations").select("id,target_language,source_language,translated_text,model,created_at").eq("document_id", document_id).order("created_at", desc=True).execute().data
     return {"document": doc, "digitizations": digs, "extractions": exts, "translations": trans}
+
+
+# ── document chat ───────────────────────────────────────────────────────────
+
+def create_document_conversation(*, document_id: str, title: str) -> Dict[str, Any]:
+    row = {"document_id": document_id, "title": title}
+    res = supabase().table("document_conversations").insert(row).execute()
+    return res.data[0]
+
+
+def get_document_conversation(conversation_id: str) -> Optional[Dict[str, Any]]:
+    res = (
+        supabase()
+        .table("document_conversations")
+        .select("*")
+        .eq("id", conversation_id)
+        .limit(1)
+        .execute()
+    )
+    return res.data[0] if res.data else None
+
+
+def list_document_conversations(document_id: str) -> List[Dict[str, Any]]:
+    res = (
+        supabase()
+        .table("document_conversations")
+        .select("*")
+        .eq("document_id", document_id)
+        .order("updated_at", desc=True)
+        .execute()
+    )
+    return res.data or []
+
+
+def insert_document_chat_message(
+    *,
+    conversation_id: str,
+    document_id: str,
+    role: str,
+    content: str,
+    model: Optional[str] = None,
+) -> Dict[str, Any]:
+    row = {
+        "conversation_id": conversation_id,
+        "document_id": document_id,
+        "role": role,
+        "content": content,
+        "model": model,
+    }
+    res = supabase().table("document_chat_messages").insert(row).execute()
+    return res.data[0]
+
+
+def list_document_chat_messages(conversation_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+    res = (
+        supabase()
+        .table("document_chat_messages")
+        .select("*")
+        .eq("conversation_id", conversation_id)
+        .order("created_at", desc=False)
+        .limit(limit)
+        .execute()
+    )
+    return res.data or []

@@ -14,6 +14,7 @@ import logging
 import tempfile
 import time
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -108,6 +109,46 @@ class LegalSearchResultOut(BaseModel):
 class LegalSearchItemsOut(BaseModel):
     items: list[LegalSearchItemOut]
     model: str
+
+
+class IngestDocumentOut(BaseModel):
+    document_id: str
+    vector_ingestion_status: str
+    structured_ingestion_status: str
+
+
+class ChatMessageOut(BaseModel):
+    id: Optional[str] = None
+    role: str
+    content: str
+    created_at: Optional[str] = None
+
+
+class DocumentConversationOut(BaseModel):
+    id: str
+    document_id: str
+    title: str
+    created_at: str
+    updated_at: Optional[str] = None
+
+
+class DocumentConversationsOut(BaseModel):
+    conversations: list[DocumentConversationOut]
+
+
+class ChatMessagesOut(BaseModel):
+    messages: list[ChatMessageOut]
+
+
+class DocumentChatIn(BaseModel):
+    message: str
+    conversation_id: Optional[str] = None
+
+
+class DocumentChatOut(BaseModel):
+    conversation_id: str
+    answer: str
+    messages: list[ChatMessageOut]
 
 
 # ── MVP: digitise + coordinates first, English generation second ────────────
@@ -341,6 +382,102 @@ def generate_search_items(body: LegalSearchItemsIn):
     return LegalSearchItemsOut(items=items, model=sarvam.RESEARCH_SEARCH_MODEL)
 
 
+@router.post("/documents/{document_id}/ingest", response_model=IngestDocumentOut)
+def mark_document_ingested(document_id: str):
+    """Mark MVP document-level ingestion complete.
+
+    Real vector + structured ingestion workers will replace this with queued
+    jobs; for now Submit marks both statuses ready so chat can open.
+    """
+    if not repo.get_document(document_id):
+        raise HTTPException(404, "document not found")
+    try:
+        repo.update_document_ingestion_status(
+            document_id=document_id,
+            vector_status="ready",
+            structured_status="ready",
+            last_ingested_at=datetime.now(timezone.utc).isoformat(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("document.ingest.failed document_id=%s", document_id)
+        raise HTTPException(502, f"Supabase ingestion status update failed: {exc}") from exc
+    return IngestDocumentOut(
+        document_id=document_id,
+        vector_ingestion_status="ready",
+        structured_ingestion_status="ready",
+    )
+
+
+@router.get("/documents/{document_id}/conversations", response_model=DocumentConversationsOut)
+def list_document_conversations(document_id: str):
+    if not repo.get_document(document_id):
+        raise HTTPException(404, "document not found")
+    return DocumentConversationsOut(conversations=repo.list_document_conversations(document_id))
+
+
+@router.get("/conversations/{conversation_id}/messages", response_model=ChatMessagesOut)
+def list_conversation_messages(conversation_id: str):
+    conversation = repo.get_document_conversation(conversation_id)
+    if not conversation:
+        raise HTTPException(404, "conversation not found")
+    return ChatMessagesOut(messages=repo.list_document_chat_messages(conversation_id))
+
+
+@router.post("/documents/{document_id}/chat", response_model=DocumentChatOut)
+def chat_with_document(document_id: str, body: DocumentChatIn):
+    question = body.message.strip()
+    if not question:
+        raise HTTPException(400, "message is required")
+
+    bundle = repo.get_document_bundle(document_id)
+    if not bundle:
+        raise HTTPException(404, "document not found")
+    context = _document_chat_context(bundle)
+    if not context:
+        raise HTTPException(400, "document has no English or raw extraction to chat over")
+
+    conversation = _resolve_conversation(document_id=document_id, conversation_id=body.conversation_id, question=question)
+    prior_messages = repo.list_document_chat_messages(conversation["id"], limit=12)
+
+    try:
+        repo.insert_document_chat_message(
+            conversation_id=conversation["id"],
+            document_id=document_id,
+            role="user",
+            content=question,
+        )
+        answer = _answer_document_question(
+            context=context,
+            question=question,
+            prior_messages=prior_messages,
+            file_name=bundle["document"].get("file_name") or "document",
+        )
+        assistant_row = repo.insert_document_chat_message(
+            conversation_id=conversation["id"],
+            document_id=document_id,
+            role="assistant",
+            content=answer,
+            model=sarvam.CHAT_MODEL,
+        )
+    except sarvam.SarvamError as exc:
+        logger.exception("document.chat.sarvam_error document_id=%s", document_id)
+        raise HTTPException(502, f"Sarvam chat failed: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("document.chat.persist_failed document_id=%s", document_id)
+        raise HTTPException(502, f"Supabase chat persistence failed: {exc}") from exc
+
+    messages = [
+        ChatMessageOut(role="user", content=question),
+        ChatMessageOut(
+            id=assistant_row.get("id"),
+            role="assistant",
+            content=answer,
+            created_at=assistant_row.get("created_at"),
+        ),
+    ]
+    return DocumentChatOut(conversation_id=conversation["id"], answer=answer, messages=messages)
+
+
 @router.get("/documents/{document_id}")
 def get_document(document_id: str):
     """Return the persisted document with its digitizations/extractions/translations."""
@@ -556,6 +693,53 @@ def _section_sort_key(section: str) -> tuple[int, str]:
     numeric = "".join(ch for ch in section if ch.isdigit())
     suffix = "".join(ch for ch in section if not ch.isdigit())
     return (int(numeric or 0), suffix)
+
+
+def _resolve_conversation(*, document_id: str, conversation_id: Optional[str], question: str) -> dict[str, Any]:
+    if conversation_id:
+        conversation = repo.get_document_conversation(conversation_id)
+        if not conversation or conversation.get("document_id") != document_id:
+            raise HTTPException(404, "conversation not found")
+        return conversation
+    title = question[:80] or "Document chat"
+    return repo.create_document_conversation(document_id=document_id, title=title)
+
+
+def _document_chat_context(bundle: dict[str, Any]) -> str:
+    translation = bundle.get("translations", [{}])[0].get("translated_text") if bundle.get("translations") else ""
+    raw = bundle.get("digitizations", [{}])[0].get("content") if bundle.get("digitizations") else ""
+    return (translation or raw or "")[:24000]
+
+
+def _answer_document_question(
+    *,
+    context: str,
+    question: str,
+    prior_messages: list[dict[str, Any]],
+    file_name: str,
+) -> str:
+    history = "\n".join(
+        f"{message.get('role', 'user').upper()}: {str(message.get('content') or '')[:1200]}"
+        for message in prior_messages[-8:]
+    )
+    system = (
+        "You are Samajh, a legal document chat assistant for individual lawyers. "
+        "Answer only from the provided filing context. If the answer is not in the "
+        "document, say that it is not available in the filing. Be concise, practical, "
+        "and cite page labels or section references when present. Do not invent facts."
+    )
+    user = (
+        f"FILE: {file_name}\n\n"
+        f"DOCUMENT CONTEXT:\n{context}\n\n"
+        f"RECENT CONVERSATION:\n{history or 'None'}\n\n"
+        f"QUESTION: {question}"
+    )
+    return sarvam.chat(
+        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+        model=sarvam.CHAT_MODEL,
+        temperature=0.1,
+        max_tokens=1600,
+    )
 
 
 def _persist_process(

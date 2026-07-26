@@ -25,6 +25,10 @@ Frontend: `cd frontend && npm run dev` → http://localhost:3000 (upload a PDF).
 | `POST` | `/api/documents/process` | upload PDF → digitise → coordinate pages → IPC summaries → persist. Returns `{raw_extraction, pages, ipc_sections[], document_id, filing_type}` |
 | `POST` | `/api/documents/english` | generate English Markdown from `{raw_extraction, pages, document_id}` using Sarvam chat completions |
 | `POST` | `/api/documents/english/stream` | same English generation as NDJSON events: `start`, `chunk_start`, repeated `delta`, then `done` with stitched `eng_extraction` |
+| `POST` | `/api/documents/{id}/ingest` | MVP submit action: mark vector + structured ingestion statuses `ready` |
+| `POST` | `/api/documents/{id}/chat` | ask a document-grounded question using the latest English translation as context |
+| `GET`  | `/api/documents/{id}/conversations` | persisted chat threads for one document |
+| `GET`  | `/api/conversations/{id}/messages` | persisted turns for one chat thread |
 | `GET`  | `/api/documents/{id}` | persisted document + digitizations/extractions/translations |
 | `GET`  | `/api/documents/{id}/pdf` | stream the original PDF from private Supabase Storage |
 | `POST` | `/api/documents/search-items` | use Sarvam to derive contextual legal queries from an analysis section, then search Indian Kanoon + Google CSE |
@@ -56,7 +60,8 @@ uploads; the object path is persisted in `documents.file_ref`.
 Next ingestion tables are defined in `supabase/ingestion_schema.sql`:
 `document_vector_chunks` for document-level retrieval and
 `chargesheet_structured_extractions` for structured chargesheet facts. It also
-adds `vector_ingestion_status` and `structured_ingestion_status` to `documents`.
+adds `vector_ingestion_status` and `structured_ingestion_status` to `documents`,
+plus `document_conversations` and `document_chat_messages` for chat history.
 
 Contextual legal research mirrors MiniHarvey's provider contract:
 `INDIAN_KANOON_API_TOKEN`, `GOOGLE_API_KEY`, `GOOGLE_SEARCH_CX`, and

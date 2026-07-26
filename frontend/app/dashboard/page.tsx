@@ -11,6 +11,7 @@ import {
   Languages,
   LayoutDashboard,
   Loader2,
+  MessageCircle,
   Scale,
   Settings,
   Upload,
@@ -274,6 +275,7 @@ export default function DashboardPage() {
                       <Th>Status</Th>
                       <Th>Vector</Th>
                       <Th>Structured</Th>
+                      <Th>Chat</Th>
                       <Th>Uploaded</Th>
                     </tr>
                   </thead>
@@ -293,6 +295,26 @@ export default function DashboardPage() {
                         <Td><StatusPill status={doc.status} /></Td>
                         <Td><StatusPill status={doc.vector_ingestion_status ?? 'not started'} /></Td>
                         <Td><StatusPill status={doc.structured_ingestion_status ?? 'not started'} /></Td>
+                        <Td>
+                          <button
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              router.push(`/chat/${doc.id}`);
+                            }}
+                            disabled={(doc.vector_ingestion_status ?? 'not_started') !== 'ready'}
+                            aria-label={`Chat with ${doc.file_name}`}
+                            className="inline-flex items-center cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                            style={{
+                              border: `1px solid ${t.color.border}`,
+                              borderRadius: t.radius.sm,
+                              backgroundColor: t.color.surface,
+                              color: t.color.accentBright,
+                              padding: 7,
+                            }}
+                          >
+                            <MessageCircle size={15} />
+                          </button>
+                        </Td>
                         <Td>{formatDate(doc.created_at)}</Td>
                       </tr>
                     ))}

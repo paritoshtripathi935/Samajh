@@ -90,6 +90,7 @@ export default function DocumentPage() {
   const [searchItems, setSearchItems] = useState<LegalSearchItem[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [submitLoading, setSubmitLoading] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -241,6 +242,18 @@ export default function DocumentPage() {
     }
   }
 
+  async function submitDocument() {
+    if (!view || submitLoading) return;
+    setSubmitLoading(true);
+    try {
+      if (view.documentId) await api.markDocumentIngested(view.documentId);
+      router.push('/dashboard');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setSubmitLoading(false);
+    }
+  }
+
 function downloadMarkdown() {
     if (!view) return;
     const blob = new Blob([tab === 'raw' ? view.original : view.english], { type: 'text/markdown;charset=utf-8' });
@@ -307,7 +320,13 @@ function downloadMarkdown() {
         )}
         <ToolbarButton onClick={copyEnglish} disabled={!view?.english} icon={<Clipboard size={15} />} label="Copy English" />
         <ToolbarButton onClick={downloadMarkdown} disabled={!view} icon={<Download size={15} />} label="Download Markdown" />
-        <ToolbarButton onClick={() => router.push('/dashboard')} icon={<Send size={15} />} label="Submit" primary />
+        <ToolbarButton
+          onClick={submitDocument}
+          disabled={submitLoading}
+          icon={submitLoading ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />}
+          label={submitLoading ? 'Submitting' : 'Submit'}
+          primary
+        />
         <ThemeToggle />
       </header>
 
