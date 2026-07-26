@@ -1,0 +1,141 @@
+@import "tailwindcss";
+
+/* ──────────────────────────────────────────────────────────────
+   Theme tokens — Samajh's entire surface palette routes through
+   these variables so [data-theme="light"] can swap everything at
+   once. Gold accent stays (with a slightly deeper gold on paper
+   for contrast); the navy/cream axis swaps.
+   ──────────────────────────────────────────────────────────── */
+
+:root,
+[data-theme="dark"] {
+  --bg: #050d1f;               /* page background */
+  --surface: #071224;          /* sidebars, composer, header */
+  --surface-raised: #0a1628;   /* cards */
+  --surface-active: #0d1d35;   /* pinned / selected card */
+  --surface-hover: #112040;    /* button hover, active row */
+  --border: #1a3060;
+  --border-subtle: rgba(26, 48, 96, 0.55);
+  --scrollbar-track: #0a1628;
+  --scrollbar-thumb: #243d7a;
+
+  --text: #f3f4f6;             /* primary */
+  --text-bright: #e5e7eb;      /* answer body */
+  --text-secondary: #d1d5db;
+  --text-muted: #9ca3af;
+  --text-dim: #6b7280;
+  --text-conclusion: #f0e8d0;  /* warm cream on dark */
+
+  --accent: #d4a017;           /* gold */
+  --accent-bright: #f0c040;
+  --accent-soft: rgba(212, 160, 23, 0.45);
+  --accent-flash: rgba(212, 160, 23, 0.55);
+
+  /* Confidence signalling for extracted fields (jump-to-source trust). */
+  --flag-warn: #d97706;
+  --flag-warn-soft: rgba(217, 119, 6, 0.18);
+  --highlight: rgba(212, 160, 23, 0.32); /* PDF source-span highlight */
+}
+
+[data-theme="light"] {
+  --bg: #f7f2e6;               /* warm legal paper */
+  --surface: #ffffff;          /* crisp white panels */
+  --surface-raised: #fbf7eb;   /* cream cards */
+  --surface-active: #f0e6c8;   /* pinned card — dirty gold */
+  --surface-hover: #ede5cf;    /* parchment hover */
+  --border: #d8cfb3;
+  --border-subtle: rgba(177, 163, 124, 0.45);
+  --scrollbar-track: #ede5cf;
+  --scrollbar-thumb: #c7b98c;
+
+  --text: #1a1f2e;             /* deep ink-navy */
+  --text-bright: #0f1420;
+  --text-secondary: #2f3544;
+  --text-muted: #5b6370;
+  --text-dim: #7a8292;
+  --text-conclusion: #3a2f10;  /* dark umber on cream */
+
+  --accent: #a6780a;           /* deeper gold for legibility on paper */
+  --accent-bright: #8a620a;
+  --accent-soft: rgba(166, 120, 10, 0.35);
+  --accent-flash: rgba(166, 120, 10, 0.55);
+
+  --flag-warn: #b45309;
+  --flag-warn-soft: rgba(180, 83, 9, 0.16);
+  --highlight: rgba(166, 120, 10, 0.28);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  padding: 0;
+  margin: 0;
+}
+
+body {
+  /* Inter for UI chrome (default). Content surfaces (case titles,
+     answers, notes) explicitly opt into Source Serif 4. */
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-feature-settings: 'cv11', 'ss01', 'ss03';  /* Inter's better digit + 'a' */
+  background-color: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: background-color 180ms ease, color 180ms ease;
+}
+
+/* Heading + brand surfaces opt into the serif. Apply via class
+   (rather than h1/h2 globally) so we keep precise control. */
+.serif {
+  font-family: 'Source Serif 4', 'Source Serif Pro', Georgia, 'Times New Roman', serif;
+  font-feature-settings: 'liga', 'kern';
+}
+
+.mono {
+  font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-variant-ligatures: none;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--scrollbar-track); }
+::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 3px; }
+
+/* ──────────────────────────────────────────────────────────────
+   Answer-prose — document-style typography for a cited answer.
+   Serif body, quiet hierarchy, gold only for emphasis.
+   ──────────────────────────────────────────────────────────── */
+.answer-prose {
+  font-family: 'Source Serif 4', 'Georgia', 'Times New Roman', serif;
+  font-size: 15px;
+  line-height: 1.75;
+  color: var(--text-bright);
+  letter-spacing: 0.005em;
+}
+.answer-prose p { margin: 0 0 0.9em 0; }
+.answer-prose p:last-child { margin-bottom: 0; }
+.answer-prose strong { color: var(--accent-bright); font-weight: 600; }
+.answer-prose em { color: var(--text-bright); font-style: italic; }
+
+/* Source-span highlight — the jump-to-source payoff. Add this class
+   (or set the background inline) to the matched span in the PDF/text
+   layer, then scrollIntoView. The flash fades to a steady tint. */
+.source-highlight {
+  background-color: var(--highlight);
+  border-radius: 2px;
+  animation: source-flash 1.2s ease-out;
+}
+@keyframes source-flash {
+  0%   { background-color: var(--accent-flash); }
+  100% { background-color: var(--highlight); }
+}
+
+/* Low-confidence extraction — "verify" affordance on a flagged field. */
+.flag-uncertain {
+  background-color: var(--flag-warn-soft);
+  border-bottom: 1px dashed var(--flag-warn);
+  cursor: help;
+}

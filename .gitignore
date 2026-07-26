@@ -1,0 +1,28 @@
+# Monorepo root — see frontend/.gitignore for Next.js-specific ignores.
+
+# OS / editor
+.DS_Store
+.AppleDouble
+.LSOverride
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python backend
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# Env / secrets (never commit)
+.env
+.env.local
+.env.*.local
+!*.env.example
+!.env.example

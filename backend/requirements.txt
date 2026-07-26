@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+sarvamai>=0.1.28       # official Sarvam SDK — Document Digitization, chat, translate
+requests
+httpx
+python-multipart      # FastAPI file uploads (UploadFile / File)
+supabase              # supabase-py client for cases/documents/answers (M1)
+gunicorn              # production server (Render/Fly)
