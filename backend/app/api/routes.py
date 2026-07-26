@@ -42,7 +42,6 @@ class IpcSectionOut(BaseModel):
 
 class ProcessDocumentOut(BaseModel):
     raw_extraction: str
-    eng_extraction: str
     ipc_sections: list[IpcSectionOut]
     pages: Optional[list[dict[str, Any]]] = None
     # Supabase id when persistence succeeded (best-effort); null otherwise.
@@ -50,15 +49,27 @@ class ProcessDocumentOut(BaseModel):
     filing_type: Optional[str] = None
 
 
-# ── MVP: single-call digitise → translate → IPC summary (+ persist) ─────────
+class EnglishExtractionIn(BaseModel):
+    raw_extraction: Optional[str] = None
+    pages: Optional[list[dict[str, Any]]] = None
+    document_id: Optional[str] = None
+    source_language: str = "auto"
+
+
+class EnglishExtractionOut(BaseModel):
+    eng_extraction: str
+    document_id: Optional[str] = None
+
+
+# ── MVP: digitise + coordinates first, English generation second ────────────
 
 @router.post("/documents/process", response_model=ProcessDocumentOut)
 def process_document(
     file: UploadFile = File(...),
     language: str = Form("en-IN"),
 ):
-    """Digitise (structured JSON, watermark/chrome removed), translate to
-    English, summarise IPC refs, and persist (with block coords + confidence)."""
+    """Digitise to clean text + structured block coordinates, summarize IPC
+    refs, and persist. English generation is a separate chat-completion API."""
     start = time.perf_counter()
     logger.info(
         "document.process.start filename=%s content_type=%s language=%s",
@@ -82,11 +93,70 @@ def process_document(
         processed.document_id,
         processed.filing_type,
         len(processed.raw_extraction),
-        len(processed.eng_extraction),
+        0,
         len(processed.ipc_sections),
         (time.perf_counter() - start) * 1000,
     )
     return processed
+
+
+@router.post("/documents/english", response_model=EnglishExtractionOut)
+def generate_english(body: EnglishExtractionIn):
+    """Generate English text from raw/page extraction using Sarvam chat
+    completions. Uses page-level chunks when page blocks are available."""
+    start = time.perf_counter()
+    logger.info(
+        "document.english.start document_id=%s source_language=%s raw_chars=%s pages=%s",
+        body.document_id,
+        body.source_language,
+        len(body.raw_extraction or ""),
+        len(body.pages or []),
+    )
+
+    source_text = body.raw_extraction or ""
+    pages = body.pages
+    if body.document_id and not source_text and pages is None:
+        bundle = repo.get_document_bundle(body.document_id)
+        if not bundle:
+            raise HTTPException(404, "document not found")
+        digitization = bundle["digitizations"][0] if bundle.get("digitizations") else {}
+        source_text = digitization.get("content") or ""
+        content_json = digitization.get("content_json")
+        pages = content_json if isinstance(content_json, list) else None
+
+    if not source_text.strip() and not pages:
+        raise HTTPException(400, "raw_extraction or pages is required")
+
+    try:
+        english = sarvam.generate_english_with_chat(
+            raw_text=source_text,
+            pages=pages,
+            source_language=body.source_language,
+        )
+    except sarvam.SarvamError as exc:
+        logger.exception("document.english.sarvam_error document_id=%s", body.document_id)
+        raise HTTPException(502, f"Sarvam chat completion failed: {exc}")
+
+    if body.document_id and english:
+        try:
+            repo.insert_translation(
+                document_id=body.document_id,
+                target_language="en-IN",
+                source_language=body.source_language,
+                translated_text=english,
+                model=sarvam.CHAT_TRANSLATION_MODEL,
+            )
+            logger.info("document.english.persist.done document_id=%s", body.document_id)
+        except Exception as exc:  # noqa: BLE001 - translation persistence is best-effort
+            logger.warning("English persistence failed (continuing): %s", exc)
+
+    logger.info(
+        "document.english.done document_id=%s english_chars=%s elapsed_ms=%.1f",
+        body.document_id,
+        len(english),
+        (time.perf_counter() - start) * 1000,
+    )
+    return EnglishExtractionOut(eng_extraction=english, document_id=body.document_id)
 
 
 @router.get("/documents/{document_id}")
@@ -130,7 +200,7 @@ def upload_document(
             "filingType": filing_type,
             "outputFormat": output_format,
             "digitisedText": raw_text,
-            "englishText": processed.eng_extraction,
+            "englishText": "",
             "ipcSections": [section.model_dump() for section in processed.ipc_sections],
             "status": "ready",
         },
@@ -143,7 +213,7 @@ def upload_document(
         "status": "ready",
         "preview": raw_text[:1200],
         "raw_extraction": processed.raw_extraction,
-        "eng_extraction": processed.eng_extraction,
+        "eng_extraction": "",
         "ipc_sections": processed.ipc_sections,
     }
 
@@ -197,7 +267,7 @@ def _find_doc(case_id: str, document_id: str):
 
 def _digitise_and_summarise(file: UploadFile, language: str):
     """Digitise to structured JSON, rebuild clean text (no watermark/base64),
-    translate, and summarise IPC. Returns (ProcessDocumentOut, pages, job_id)."""
+    and summarise IPC. Returns (ProcessDocumentOut, pages, job_id)."""
     suffix = Path(file.filename or "upload.pdf").suffix or ".pdf"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(file.file.read())
@@ -228,15 +298,11 @@ def _digitise_and_summarise(file: UploadFile, language: str):
             len(pages),
             len(result.output_files),
         )
-        logger.info("document.translate.start filename=%s source_language=%s clean_chars=%s", file.filename, language, len(clean_md))
-        eng_extraction = sarvam.translate_to_english(clean_md, source_language_code=language)
-        logger.info("document.translate.done filename=%s english_chars=%s", file.filename, len(eng_extraction))
         logger.info("document.ipc.start filename=%s", file.filename)
         ipc_sections = _summarize_ipc_sections(clean_md)
         logger.info("document.ipc.done filename=%s ipc_sections=%s", file.filename, [s.ipc for s in ipc_sections])
         processed = ProcessDocumentOut(
             raw_extraction=clean_md,
-            eng_extraction=eng_extraction,
             ipc_sections=ipc_sections,
             pages=pages or None,
         )
@@ -295,14 +361,6 @@ def _persist_process(
             content_json=pages or None,
             sarvam_job_id=job_id,
         )
-        if processed.eng_extraction:
-            repo.insert_translation(
-                document_id=doc["id"],
-                target_language="en-IN",
-                source_language=language,
-                translated_text=processed.eng_extraction,
-                model=sarvam.TRANSLATE_MODEL,
-            )
         if processed.ipc_sections:
             repo.insert_extraction(
                 document_id=doc["id"],

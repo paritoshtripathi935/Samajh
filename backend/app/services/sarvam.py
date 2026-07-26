@@ -15,7 +15,7 @@ Verified against docs.sarvam.ai + the SDK surface (v0.1.28), 2026-07-26:
     get_page_metrics) that also handle the presigned upload.
 
   Chat:      POST /v1/chat/completions   models: sarvam-30b | sarvam-105b | sarvam-m
-  Translate: POST /translate            models: sarvam-translate:v1 | mayura:v1
+  English generation: POST /v1/chat/completions via sarvam-105b
 
   job_parameters:
     language      BCP-47 (default hi-IN): hi-IN, en-IN, bn-IN, ta-IN, te-IN, ...
@@ -51,10 +51,9 @@ from app.core.settings import settings
 
 CHAT_MODEL = "sarvam-30b"          # sarvam-105b for the heavier model
 IPC_SUMMARY_MODEL = "sarvam-105b"
-TRANSLATE_MODEL = "sarvam-translate:v1"
-# Sarvam Translate rejects body.input above 2000 characters. Keep a margin for
-# Unicode/newline accounting and future SDK serialization quirks.
-TRANSLATE_CHUNK_SIZE = 1800
+CHAT_TRANSLATION_MODEL = "sarvam-105b"
+CHAT_TRANSLATION_CHUNK_SIZE = 9000
+CHAT_TRANSLATION_MAX_TOKENS = 4096
 MAX_DI_PAGES = 10
 logger = logging.getLogger(__name__)
 
@@ -345,37 +344,6 @@ def chat(
         return ""
 
 
-# ── Translate (regional -> plain Hindi/English) ─────────────────────────────
-
-def translate(
-    input_text: str,
-    target_language_code: str,
-    source_language_code: str = "auto",
-    mode: str = "formal",
-) -> str:
-    client = _client()
-    logger.info(
-        "sarvam.translate.start source=%s target=%s model=%s chars=%s",
-        source_language_code,
-        target_language_code,
-        TRANSLATE_MODEL,
-        len(input_text),
-    )
-    try:
-        resp = client.text.translate(
-            input=input_text,
-            source_language_code=source_language_code,
-            target_language_code=target_language_code,
-            model=TRANSLATE_MODEL,
-            mode=mode,
-        )
-    except Exception as exc:  # noqa: BLE001 - normalize SDK exceptions at our boundary
-        raise SarvamError(str(exc)) from exc
-    translated = getattr(resp, "translated_text", "") or ""
-    logger.info("sarvam.translate.done target=%s chars=%s", target_language_code, len(translated))
-    return translated
-
-
 _DATA_URI_IMG_RE = re.compile(r"!\[[^\]]*\]\(\s*data:[^)]*\)")
 _BARE_DATA_URI_RE = re.compile(r"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+")
 
@@ -452,28 +420,91 @@ def blocks_to_markdown(pages: List[Dict[str, Any]], drop_noise: bool = True) -> 
     return "\n\n".join(out)
 
 
-def translate_to_english(input_text: str, source_language_code: str) -> str:
-    """Translate digitised Markdown into English, chunking long legal filings.
-    Embedded base64 images are stripped first (the scan stays on the original)."""
-    if not input_text.strip():
+def generate_english_with_chat(
+    *,
+    raw_text: str,
+    pages: Optional[List[Dict[str, Any]]] = None,
+    source_language: str = "auto",
+) -> str:
+    """Generate English Markdown using chat completions, not Sarvam Translate.
+    Prefer page-level chunks so long filings stay inside context limits."""
+    chunks = _english_source_chunks(raw_text=raw_text, pages=pages)
+    if not chunks:
         return ""
-    text = strip_data_uris(input_text)
-    if source_language_code.lower() == "en-in":
-        logger.info("sarvam.translate.skip_english chars=%s stripped_chars=%s", len(input_text), len(text))
-        return text
 
-    chunks = _chunk_text(text, max_chars=TRANSLATE_CHUNK_SIZE)
-    logger.info("sarvam.translate.chunked chunks=%s stripped_chars=%s", len(chunks), len(text))
-    translated = [
-        translate(
-            chunk,
-            source_language_code=source_language_code,
-            target_language_code="en-IN",
-            mode="formal",
-        )
-        for chunk in chunks
-    ]
-    return "\n\n".join(part for part in translated if part)
+    logger.info(
+        "sarvam.english_chat.chunked chunks=%s raw_chars=%s pages=%s",
+        len(chunks),
+        len(raw_text),
+        len(pages or []),
+    )
+    translated: list[str] = []
+    for index, chunk in enumerate(chunks, start=1):
+        logger.info("sarvam.english_chat.chunk.start index=%s chars=%s", index, len(chunk))
+        translated.append(_english_chat_completion(chunk, index=index, total=len(chunks), source_language=source_language))
+        logger.info("sarvam.english_chat.chunk.done index=%s output_chars=%s", index, len(translated[-1]))
+    return "\n\n".join(part.strip() for part in translated if part.strip())
+
+
+def _english_source_chunks(
+    *,
+    raw_text: str,
+    pages: Optional[List[Dict[str, Any]]] = None,
+) -> list[str]:
+    if pages:
+        page_chunks = []
+        for page in sorted(pages, key=lambda p: p.get("page_num") or 0):
+            page_text = blocks_to_markdown([page])
+            if page_text.strip():
+                page_no = page.get("page_num") or page.get("page_number") or page.get("page") or len(page_chunks) + 1
+                page_chunks.append(f"[Page {page_no}]\n{page_text}")
+        return _pack_chunks(page_chunks, max_chars=CHAT_TRANSLATION_CHUNK_SIZE)
+
+    text = strip_data_uris(raw_text)
+    return _chunk_text(text, max_chars=CHAT_TRANSLATION_CHUNK_SIZE)
+
+
+def _pack_chunks(parts: list[str], max_chars: int) -> list[str]:
+    chunks: list[str] = []
+    current = ""
+    for part in parts:
+        if len(part) > max_chars:
+            if current:
+                chunks.append(current.strip())
+                current = ""
+            chunks.extend(_chunk_text(part, max_chars=max_chars))
+            continue
+        candidate = f"{current}\n\n{part}".strip() if current else part
+        if len(candidate) > max_chars:
+            chunks.append(current.strip())
+            current = part
+        else:
+            current = candidate
+    if current.strip():
+        chunks.append(current.strip())
+    return chunks
+
+
+def _english_chat_completion(chunk: str, *, index: int, total: int, source_language: str) -> str:
+    system = (
+        "You are a careful Indian legal document translator and editor. "
+        "Convert the provided OCR/digitized legal filing text into clear English Markdown. "
+        "Preserve headings, page labels, paragraph order, names, dates, FIR/case numbers, "
+        "legal sections, IPC references, and tables where possible. Do not add facts, analysis, "
+        "summaries, citations, or commentary. If the text is already English, clean OCR artifacts "
+        "lightly but preserve meaning."
+    )
+    user = (
+        f"Source language hint: {source_language}\n"
+        f"Chunk {index} of {total}. Return only the English Markdown for this chunk.\n\n"
+        f"{chunk}"
+    )
+    return chat(
+        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+        model=CHAT_TRANSLATION_MODEL,
+        temperature=0.0,
+        max_tokens=CHAT_TRANSLATION_MAX_TOKENS,
+    )
 
 
 def summarize_ipc_section(section: str) -> str:

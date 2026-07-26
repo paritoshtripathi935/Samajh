@@ -1,8 +1,9 @@
 # Samajh backend
 
-FastAPI service. **MVP:** one call digitises a filing (Sarvam Vision),
-translates it to English, and summarises the IPC sections it cites — then
-persists everything to Supabase.
+FastAPI service. **MVP:** one call digitises a filing (Sarvam Vision), returns
+clean raw extraction plus coordinate annotations, and summarises IPC sections.
+A second call generates English Markdown with Sarvam chat completions and then
+persists that translation to Supabase.
 
 ## Run it
 
@@ -19,7 +20,8 @@ Frontend: `cd frontend && npm run dev` → http://localhost:3000 (upload a PDF).
 | Method | Path | Does |
 |---|---|---|
 | `GET`  | `/health` | liveness |
-| `POST` | `/api/documents/process` | **MVP** — upload PDF → digitise → translate to English → IPC summaries → persist. Returns `{raw_extraction, eng_extraction, ipc_sections[], document_id, filing_type}` |
+| `POST` | `/api/documents/process` | upload PDF → digitise → coordinate pages → IPC summaries → persist. Returns `{raw_extraction, pages, ipc_sections[], document_id, filing_type}` |
+| `POST` | `/api/documents/english` | generate English Markdown from `{raw_extraction, pages, document_id}` using Sarvam chat completions |
 | `GET`  | `/api/documents/{id}` | persisted document + digitizations/extractions/translations |
 | `POST` | `/api/cases…`, `/ask` | workbench teammate's surface (in-memory store) — left intact |
 
@@ -27,7 +29,9 @@ Frontend: `cd frontend && npm run dev` → http://localhost:3000 (upload a PDF).
 
 - **Digitise** — the only Sarvam document REST API (async job, `sarvamai` SDK). PDFs
   over the **10-page/job** limit are auto-split with `pypdf` and stitched (`app/services/sarvam.py`).
-- **Translate** to English via `sarvam-translate:v1`, chunked for long docs.
+- **English generation** — uses `sarvam-105b` chat completions, not the Translate API.
+  Page/block JSON is used for page-level chunking where available; long fallback text is
+  chunked by character budget.
 - **IPC** — `citations.extract_ipc_references()` finds section refs; each is summarised by
   `sarvam-105b`. (Sarvam's schema "Extract" has no REST API — it's dashboard-only — so
   `app/services/extraction.py` does typed extraction via the chat model.)

@@ -1,8 +1,8 @@
 /**
  * Client for the Samajh Python backend (FastAPI).
  *
- * The MVP endpoint is `processDocument` → one call that digitises a filing,
- * translates it to English, and summarises the IPC sections. The backend owns
+ * The MVP flow is `processDocument` → raw extraction + coordinates, then
+ * `generateEnglish` → English Markdown via chat completions. The backend owns
  * Sarvam + Supabase; the browser never holds the Sarvam key. Point at it with
  * NEXT_PUBLIC_BACKEND_URL (default http://localhost:8000).
  */
@@ -78,11 +78,15 @@ export interface LayoutPage {
 
 export interface ProcessResult {
   raw_extraction: string;
-  eng_extraction: string;
   ipc_sections: IpcSection[];
   pages?: LayoutPage[] | null;
   document_id: string | null;
   filing_type: string | null;
+}
+
+export interface EnglishResult {
+  eng_extraction: string;
+  document_id: string | null;
 }
 
 export interface DocumentBundle {
@@ -123,13 +127,25 @@ export interface DocumentBundle {
 export const api = {
   health: () => request<{ status: string }>(`/health`),
 
-  /** MVP: upload a filing → digitise + translate to English + IPC summaries. */
+  /** MVP step 1: upload a filing → digitise + coordinates + IPC summaries. */
   processDocument: (file: File, opts?: { language?: string }) => {
     const form = new FormData();
     form.append('file', file);
     if (opts?.language) form.append('language', opts.language);
     return request<ProcessResult>(`/api/documents/process`, { method: 'POST', body: form });
   },
+
+  /** MVP step 2: generate English Markdown via Sarvam chat completions. */
+  generateEnglish: (body: {
+    raw_extraction?: string;
+    pages?: LayoutPage[] | null;
+    document_id?: string | null;
+    source_language?: string;
+  }) =>
+    request<EnglishResult>(`/api/documents/english`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
 
   /** The persisted document + its digitizations / extractions / translations. */
   getDocument: (documentId: string) => request<DocumentBundle>(`/api/documents/${documentId}`),

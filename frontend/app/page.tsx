@@ -40,7 +40,7 @@ export default function Home() {
         /* browser storage unavailable */
       }
       try {
-        sessionStorage.setItem('samajh:lastResult', JSON.stringify({ ...result, fileName: file.name }));
+        sessionStorage.setItem('samajh:lastResult', JSON.stringify({ ...result, fileName: file.name, sourceLanguage: language }));
       } catch {
         /* quota — the results page will fetch from the backend by id */
       }

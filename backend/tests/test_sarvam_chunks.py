@@ -1,11 +1,16 @@
-from app.services.sarvam import TRANSLATE_CHUNK_SIZE, _chunk_text
+from app.services.sarvam import CHAT_TRANSLATION_CHUNK_SIZE, _english_source_chunks
 
 
-def test_translation_chunks_stay_under_sarvam_limit():
-    text = "\n\n".join(["a" * 500, "b" * 1900, "c" * 3000])
+def test_english_generation_chunks_use_page_boundaries():
+    pages = [
+        {"page_num": 1, "blocks": [{"reading_order": 1, "text": "पहला पेज", "layout_tag": "paragraph"}]},
+        {"page_num": 2, "blocks": [{"reading_order": 1, "text": "दूसरा पेज", "layout_tag": "paragraph"}]},
+    ]
 
-    chunks = _chunk_text(text, max_chars=TRANSLATE_CHUNK_SIZE)
+    chunks = _english_source_chunks(raw_text="", pages=pages)
 
-    assert chunks
-    assert all(len(chunk) <= TRANSLATE_CHUNK_SIZE for chunk in chunks)
-    assert TRANSLATE_CHUNK_SIZE < 2000
+    assert len(chunks) == 1
+    assert "[Page 1]" in chunks[0]
+    assert "[Page 2]" in chunks[0]
+    assert chunks[0].index("[Page 1]") < chunks[0].index("[Page 2]")
+    assert len(chunks[0]) <= CHAT_TRANSLATION_CHUNK_SIZE

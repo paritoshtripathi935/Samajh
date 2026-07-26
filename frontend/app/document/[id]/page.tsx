@@ -31,6 +31,8 @@ interface View {
   ipc: IpcSection[];
   pdfUrl: string | null;
   pages: LayoutPage[];
+  documentId: string | null;
+  sourceLanguage: string;
 }
 
 function fromBundle(b: DocumentBundle, pdfUrl: string | null): View {
@@ -42,18 +44,22 @@ function fromBundle(b: DocumentBundle, pdfUrl: string | null): View {
     ipc: b.extractions[0]?.fields?.ipc_sections ?? [],
     pdfUrl,
     pages: normalizePages(b.digitizations[0]?.content_json),
+    documentId: b.document.id,
+    sourceLanguage: b.document.source_language ?? 'auto',
   };
 }
 
-function fromResult(r: ProcessResult & { fileName?: string }, pdfUrl: string | null): View {
+function fromResult(r: ProcessResult & { fileName?: string; sourceLanguage?: string }, pdfUrl: string | null): View {
   return {
     fileName: r.fileName ?? 'document.pdf',
     filingType: r.filing_type,
     original: r.raw_extraction,
-    english: r.eng_extraction,
+    english: '',
     ipc: r.ipc_sections,
     pdfUrl,
     pages: normalizePages(r.pages),
+    documentId: r.document_id,
+    sourceLanguage: r.sourceLanguage ?? 'auto',
   };
 }
 
@@ -64,6 +70,8 @@ export default function DocumentPage() {
   const [view, setView] = useState<View | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<ExtractionTab>('english');
+  const [englishLoading, setEnglishLoading] = useState(false);
+  const [englishError, setEnglishError] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -97,6 +105,42 @@ export default function DocumentPage() {
       alive = false;
     };
   }, [id]);
+
+  useEffect(() => {
+    let alive = true;
+    async function runEnglish() {
+      if (!view || view.english || englishLoading) return;
+      setEnglishLoading(true);
+      setEnglishError(null);
+      try {
+        const result = await api.generateEnglish({
+          raw_extraction: view.original,
+          pages: view.pages,
+          document_id: view.documentId,
+          source_language: view.sourceLanguage,
+        });
+        if (!alive) return;
+        setView((current) => (current ? { ...current, english: result.eng_extraction } : current));
+        try {
+          const raw = sessionStorage.getItem('samajh:lastResult');
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            sessionStorage.setItem('samajh:lastResult', JSON.stringify({ ...parsed, eng_extraction: result.eng_extraction }));
+          }
+        } catch {
+          /* ignore */
+        }
+      } catch (err) {
+        if (alive) setEnglishError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (alive) setEnglishLoading(false);
+      }
+    }
+    runEnglish();
+    return () => {
+      alive = false;
+    };
+  }, [view, englishLoading]);
 
   const activeText = tab === 'raw' ? view?.original ?? '' : view?.english ?? '';
   const stats = useMemo(() => {
@@ -231,7 +275,15 @@ function downloadMarkdown() {
                   padding: t.space.lg,
                 }}
               >
-                {activeText ? <Markdown>{activeText}</Markdown> : <Empty title="No extraction" text="This response did not include text for this tab." />}
+                {tab === 'english' && englishLoading ? (
+                  <Empty title="Generating English translation" text="Sarvam chat completions is working through the document in page-level chunks." />
+                ) : tab === 'english' && englishError ? (
+                  <Empty title="English generation failed" text={englishError} />
+                ) : activeText ? (
+                  <Markdown>{activeText}</Markdown>
+                ) : (
+                  <Empty title="No extraction" text="This response did not include text for this tab." />
+                )}
               </article>
             </div>
           </section>
