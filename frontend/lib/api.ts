@@ -90,6 +90,24 @@ export interface EnglishResult {
   document_id: string | null;
 }
 
+export interface LegalSearchItem {
+  title: string;
+  query: string;
+  rationale: string;
+  kind: 'precedent' | 'statute' | 'procedure' | 'evidence' | 'defence';
+  results: LegalSearchResult[];
+}
+
+export interface LegalSearchResult {
+  title: string;
+  url: string;
+  snippet: string;
+  source: 'indian_kanoon' | 'google';
+  doc_type: 'judgment' | 'act' | 'article';
+  jurisdiction: string | null;
+  citation: string | null;
+}
+
 export type EnglishStreamEvent =
   | { type: 'start'; chunks: number; document_id: string | null; model?: string }
   | { type: 'chunk_start'; index: number; total: number }
@@ -112,6 +130,7 @@ export interface DocumentBundle {
     source_language: string | null;
     page_count: number | null;
     status: string;
+    file_ref: string | null;
     created_at: string;
   };
   digitizations: {
@@ -205,6 +224,20 @@ export const api = {
     if (buffer.trim()) onEvent(JSON.parse(buffer) as EnglishStreamEvent);
   },
 
+  /** Generate contextual legal research searches from one analysis section. */
+  generateSearchItems: (body: {
+    section_title: string;
+    section_content: string;
+    filing_type?: string | null;
+  }) =>
+    request<{ items: LegalSearchItem[]; model: string }>(`/api/documents/search-items`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
   /** The persisted document + its digitizations / extractions / translations. */
   getDocument: (documentId: string) => request<DocumentBundle>(`/api/documents/${documentId}`),
+
+  /** Backend-served URL for the original PDF in private Supabase Storage. */
+  documentPdfUrl: (documentId: string) => `${BASE}/api/documents/${documentId}/pdf`,
 };

@@ -18,11 +18,11 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from app import repositories as repo
-from app.services import extraction, sarvam, store
+from app.services import extraction, legal_search, sarvam, store
 from app.services.citations import extract_ipc_references
 
 logger = logging.getLogger(__name__)
@@ -63,6 +63,35 @@ class EnglishExtractionOut(BaseModel):
     document_id: Optional[str] = None
 
 
+class LegalSearchItemsIn(BaseModel):
+    section_title: str
+    section_content: str
+    filing_type: Optional[str] = None
+
+
+class LegalSearchItemOut(BaseModel):
+    title: str
+    query: str
+    rationale: str
+    kind: str
+    results: list["LegalSearchResultOut"]
+
+
+class LegalSearchResultOut(BaseModel):
+    title: str
+    url: str
+    snippet: str
+    source: str
+    doc_type: str
+    jurisdiction: Optional[str] = None
+    citation: Optional[str] = None
+
+
+class LegalSearchItemsOut(BaseModel):
+    items: list[LegalSearchItemOut]
+    model: str
+
+
 # ── MVP: digitise + coordinates first, English generation second ────────────
 
 @router.post("/documents/process", response_model=ProcessDocumentOut)
@@ -79,6 +108,8 @@ def process_document(
         file.content_type,
         language,
     )
+    original_pdf = file.file.read()
+    file.file.seek(0)
     processed, pages, job_id = _digitise_and_summarise(file=file, language=language)
     logger.info("document.process.detect_filing_type.start raw_chars=%s", len(processed.raw_extraction))
     processed.filing_type = extraction.detect_filing_type(processed.raw_extraction)
@@ -88,6 +119,7 @@ def process_document(
         processed=processed,
         pages=pages,
         job_id=job_id,
+        original_pdf=original_pdf,
     )
     logger.info(
         "document.process.done filename=%s document_id=%s filing_type=%s raw_chars=%s english_chars=%s ipc_count=%s elapsed_ms=%.1f",
@@ -260,6 +292,24 @@ def stream_english(body: EnglishExtractionIn):
     )
 
 
+@router.post("/documents/search-items", response_model=LegalSearchItemsOut)
+def generate_search_items(body: LegalSearchItemsIn):
+    """Generate contextual legal-research searches from an analysis section."""
+    if not body.section_title.strip() or not body.section_content.strip():
+        raise HTTPException(400, "section_title and section_content are required")
+    try:
+        generated = sarvam.generate_legal_search_items(
+            section_title=body.section_title,
+            section_content=body.section_content,
+            filing_type=body.filing_type,
+        )
+        items = legal_search.search_generated_items(generated)
+    except sarvam.SarvamError as exc:
+        logger.exception("document.search_items.sarvam_error section=%s", body.section_title)
+        raise HTTPException(502, f"Sarvam search generation failed: {exc}") from exc
+    return LegalSearchItemsOut(items=items, model=sarvam.RESEARCH_SEARCH_MODEL)
+
+
 @router.get("/documents/{document_id}")
 def get_document(document_id: str):
     """Return the persisted document with its digitizations/extractions/translations."""
@@ -270,6 +320,27 @@ def get_document(document_id: str):
         raise HTTPException(404, "document not found")
     logger.info("document.get.done document_id=%s", document_id)
     return bundle
+
+
+@router.get("/documents/{document_id}/pdf")
+def get_document_pdf(document_id: str):
+    """Serve the original PDF kept in the private Supabase Storage bucket."""
+    doc = repo.get_document(document_id)
+    if not doc:
+        raise HTTPException(404, "document not found")
+    file_ref = doc.get("file_ref")
+    if not file_ref:
+        raise HTTPException(404, "original PDF was not stored")
+    try:
+        content = repo.download_document_file(file_ref)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("document.pdf.download_failed document_id=%s error=%s", document_id, exc)
+        raise HTTPException(502, "could not retrieve original PDF") from exc
+    return Response(
+        content=content,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{doc["file_name"]}"'},
+    )
 
 
 # ── Workbench teammate's surface (in-memory store) — left intact ────────────
@@ -463,6 +534,7 @@ def _persist_process(
     processed: ProcessDocumentOut,
     pages: Optional[list] = None,
     job_id: Optional[str] = None,
+    original_pdf: Optional[bytes] = None,
 ) -> Optional[str]:
     """Best-effort: persist the processed result to Supabase. Never fail the
     request on a DB error — the MVP demo must still return its result.
@@ -476,6 +548,22 @@ def _persist_process(
             page_count=len(pages) if pages else None,
             status="ready",
         )
+        if original_pdf:
+            try:
+                file_ref = repo.upload_document_file(
+                    document_id=doc["id"],
+                    file_name=file_name,
+                    content=original_pdf,
+                )
+                repo.update_document(doc["id"], file_ref=file_ref)
+            except Exception as exc:  # noqa: BLE001
+                # Keep the extraction available even if Storage is temporarily
+                # unavailable; file_ref remains null and the PDF endpoint says so.
+                logger.warning(
+                    "Supabase PDF upload failed document_id=%s (continuing): %s",
+                    doc["id"],
+                    exc,
+                )
         repo.insert_digitization(
             document_id=doc["id"],
             output_format="json",

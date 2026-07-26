@@ -50,14 +50,20 @@ _PATTERNS = {
 
 _CASE_TYPES = {"air", "scc", "scr", "ilr"}
 
-_IPC_PATTERN = re.compile(
-    r"(?P<raw>"
-    r"(?:(?:Section|Sec\.?|u/s|U/S|S\.?)\s*(?P<section_a>\d+[A-Z]?)\s*(?:of\s+)?(?:IPC|I\.P\.C\.))"
-    r"|"
-    r"(?:(?:IPC|I\.P\.C\.)\s*(?:Section|Sec\.?)?\s*(?P<section_b>\d+[A-Z]?))"
-    r")",
+_SECTION_TOKEN = r"\d+(?:[A-Z]|[-–]\s*[A-Z]|\s*\([A-Z]\))?"
+_IPC_LIST_PATTERN = re.compile(
+    rf"(?P<raw>"
+    rf"(?:Sections?|Sec(?:tion)?s?\.?|u/s|U/S|S\.?)\s*"
+    rf"(?P<sections>{_SECTION_TOKEN}(?:(?:\s*,\s*|\s+and\s+|\s*&\s*|\s+read\s+with\s+){_SECTION_TOKEN})*)"
+    rf"\s*(?:of\s+(?:the\s+)?)?(?:IPC|I\.P\.C\.)"
+    rf")",
     re.IGNORECASE,
 )
+_IPC_PREFIX_PATTERN = re.compile(
+    rf"(?P<raw>(?:IPC|I\.P\.C\.)\s+(?:Sections?|Sec(?:tion)?s?\.?)\s*(?P<sections>{_SECTION_TOKEN}))",
+    re.IGNORECASE,
+)
+_SECTION_TOKEN_PATTERN = re.compile(_SECTION_TOKEN, re.IGNORECASE)
 
 
 def extract_citations(text: str) -> List[Citation]:
@@ -84,24 +90,23 @@ def extract_ipc_references(text: str) -> List[IpcReference]:
     refs: List[IpcReference] = []
     seen_ranges: Set[tuple[int, int]] = set()
 
-    for match in _IPC_PATTERN.finditer(text):
-        start, end = match.span()
-        if (start, end) in seen_ranges:
-            continue
-
-        section = match.group("section_a") or match.group("section_b")
-        if not section:
-            continue
-
-        refs.append(
-            IpcReference(
-                section=section.upper(),
-                raw_text=match.group("raw"),
-                start_offset=start,
-                end_offset=end,
+    matches = [*_IPC_LIST_PATTERN.finditer(text), *_IPC_PREFIX_PATTERN.finditer(text)]
+    for match in sorted(matches, key=lambda item: item.start()):
+        for token in _SECTION_TOKEN_PATTERN.finditer(match.group("sections")):
+            start = match.start("sections") + token.start()
+            end = match.start("sections") + token.end()
+            if (start, end) in seen_ranges:
+                continue
+            section = re.sub(r"[\s()\-–]", "", token.group()).upper()
+            refs.append(
+                IpcReference(
+                    section=section,
+                    raw_text=text[start:end],
+                    start_offset=start,
+                    end_offset=end,
+                )
             )
-        )
-        seen_ranges.add((start, end))
+            seen_ranges.add((start, end))
 
     return refs
 

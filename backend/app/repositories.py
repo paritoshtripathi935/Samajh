@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from app.db import supabase
+from app.core.settings import settings
 
 
 # ── documents ───────────────────────────────────────────────────────────────
@@ -44,6 +45,23 @@ def update_document(document_id: str, **fields: Any) -> Dict[str, Any]:
 def get_document(document_id: str) -> Optional[Dict[str, Any]]:
     res = supabase().table("documents").select("*").eq("id", document_id).limit(1).execute()
     return res.data[0] if res.data else None
+
+
+def upload_document_file(*, document_id: str, file_name: str, content: bytes) -> str:
+    """Upload an original filing and return its stable Storage object path."""
+    safe_name = file_name.replace("\\", "_").replace("/", "_") or "document.pdf"
+    path = f"{document_id}/{safe_name}"
+    supabase().storage.from_(settings.supabase_documents_bucket).upload(
+        path,
+        content,
+        {"content-type": "application/pdf", "upsert": "true"},
+    )
+    return path
+
+
+def download_document_file(file_ref: str) -> bytes:
+    """Download a private original filing by its Storage object path."""
+    return supabase().storage.from_(settings.supabase_documents_bucket).download(file_ref)
 
 
 # ── digitizations ───────────────────────────────────────────────────────────

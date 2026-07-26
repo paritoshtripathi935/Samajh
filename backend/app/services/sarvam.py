@@ -51,6 +51,7 @@ from app.core.settings import settings
 
 CHAT_MODEL = "sarvam-30b"          # sarvam-105b for the heavier model
 IPC_SUMMARY_MODEL = "sarvam-105b"
+RESEARCH_SEARCH_MODEL = "sarvam-105b"
 CHAT_TRANSLATION_MODEL = "sarvam-105b"
 CHAT_TRANSLATION_CHUNK_SIZE = 3000
 CHAT_TRANSLATION_MAX_TOKENS = 4096
@@ -692,6 +693,88 @@ def summarize_ipc_section(section: str) -> str:
         "the offence it defines, and the punishment prescribed. Be concise. "
         "Do not invent details; mention uncertainty if needed."
     )
+
+
+def generate_legal_search_items(
+    *,
+    section_title: str,
+    section_content: str,
+    filing_type: Optional[str] = None,
+) -> List[Dict[str, str]]:
+    """Turn one analysis section into focused legal-research searches.
+
+    Sarvam supplies the research framing; the backend validates its JSON and
+    returns validated structured queries for the source-search pipeline.
+    """
+    system = (
+        "You are an Indian legal research strategist. Given one analysis section "
+        "from a filing, generate 3 to 5 precise research searches grounded in the "
+        "section's actual facts and legal issues. Cover useful combinations of "
+        "precedent, statutory interpretation, procedure, ingredients, defences, "
+        "or evidentiary questions only when supported by the content. Do not merely "
+        "search for the IPC section number. Return only a JSON array. Each object "
+        "must contain: title (short label), query (a search-engine-ready Indian "
+        "legal query), rationale (one sentence), and kind (one of precedent, "
+        "statute, procedure, evidence, defence)."
+    )
+    user = (
+        f"Filing type: {filing_type or 'unknown'}\n"
+        f"Analysis section: {section_title}\n\n"
+        f"Section content:\n{section_content[:8000]}"
+    )
+    raw = chat(
+        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+        model=RESEARCH_SEARCH_MODEL,
+        temperature=0.15,
+        max_tokens=1800,
+    )
+    payload = _json_from_chat(raw)
+    if not isinstance(payload, list):
+        raise SarvamError("Sarvam search response was not a JSON array")
+
+    allowed_kinds = {"precedent", "statute", "procedure", "evidence", "defence"}
+    items: List[Dict[str, str]] = []
+    for value in payload[:5]:
+        if not isinstance(value, dict):
+            continue
+        title = str(value.get("title") or "").strip()
+        query = str(value.get("query") or "").strip()
+        rationale = str(value.get("rationale") or "").strip()
+        kind = str(value.get("kind") or "precedent").strip().lower()
+        if not title or not query or not rationale:
+            continue
+        if kind not in allowed_kinds:
+            kind = "precedent"
+        items.append(
+            {
+                "title": title[:120],
+                "query": query[:500],
+                "rationale": rationale[:500],
+                "kind": kind,
+            }
+        )
+    if not items:
+        raise SarvamError("Sarvam did not return any valid legal search items")
+    return items
+
+
+def _json_from_chat(text: str) -> Any:
+    cleaned = text.strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", cleaned, re.DOTALL | re.IGNORECASE)
+    if fenced:
+        cleaned = fenced.group(1)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        start = min((index for index in (cleaned.find("["), cleaned.find("{")) if index >= 0), default=-1)
+        if start >= 0:
+            decoder = json.JSONDecoder()
+            try:
+                value, _ = decoder.raw_decode(cleaned[start:])
+                return value
+            except json.JSONDecodeError:
+                pass
+        raise SarvamError("Sarvam returned invalid JSON for legal search items") from exc
     return chat(
         messages=[
             {"role": "system", "content": system},

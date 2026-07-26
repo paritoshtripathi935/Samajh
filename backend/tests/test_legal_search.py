@@ -1,0 +1,64 @@
+from app.services import legal_search, sarvam
+
+
+def test_sarvam_search_items_are_parsed_and_validated(monkeypatch):
+    monkeypatch.setattr(
+        sarvam,
+        "chat",
+        lambda **kwargs: """```json
+        [
+          {
+            "title": "Dishonest inducement",
+            "query": "dishonest inducement delivery of property cheating Supreme Court India",
+            "rationale": "Tests the required causal link between inducement and delivery.",
+            "kind": "precedent"
+          }
+        ]
+        ```""",
+    )
+
+    items = sarvam.generate_legal_search_items(
+        section_title="Cheating allegation",
+        section_content="The accused allegedly induced payment using forged purchase orders.",
+        filing_type="chargesheet",
+    )
+
+    assert items == [
+        {
+            "title": "Dishonest inducement",
+            "query": "dishonest inducement delivery of property cheating Supreme Court India",
+            "rationale": "Tests the required causal link between inducement and delivery.",
+            "kind": "precedent",
+        }
+    ]
+
+
+def test_generated_items_receive_balanced_source_results(monkeypatch):
+    monkeypatch.setattr(
+        legal_search,
+        "_search_one",
+        lambda query: [
+            {
+                "title": "Authority",
+                "url": "https://indiankanoon.org/doc/1/",
+                "snippet": "Relevant holding",
+                "source": "indian_kanoon",
+                "doc_type": "judgment",
+                "jurisdiction": "Supreme Court of India",
+                "citation": None,
+            }
+        ],
+    )
+    generated = [
+        {
+            "title": "Dishonest inducement",
+            "query": "dishonest inducement cheating",
+            "rationale": "Find the governing test.",
+            "kind": "precedent",
+        }
+    ]
+
+    enriched = legal_search.search_generated_items(generated)
+
+    assert enriched[0]["query"] == "dishonest inducement cheating"
+    assert enriched[0]["results"][0]["source"] == "indian_kanoon"

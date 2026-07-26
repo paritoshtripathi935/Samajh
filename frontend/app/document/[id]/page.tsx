@@ -11,14 +11,25 @@ import {
   Download,
   FileText,
   Gavel,
+  ExternalLink,
   Languages,
   Loader2,
   Scale,
   Send,
+  Search,
+  X,
 } from 'lucide-react';
 import ThemeToggle from '@/components/ThemeToggle';
 import Markdown from '@/components/Markdown';
-import { api, type DocumentBundle, type IpcSection, type LayoutBlock, type LayoutPage, type ProcessResult } from '@/lib/api';
+import {
+  api,
+  type DocumentBundle,
+  type IpcSection,
+  type LayoutBlock,
+  type LayoutPage,
+  type LegalSearchItem,
+  type ProcessResult,
+} from '@/lib/api';
 import { t } from '@/lib/design/tokens';
 
 type ExtractionTab = 'raw' | 'english';
@@ -74,6 +85,11 @@ export default function DocumentPage() {
   const [englishError, setEnglishError] = useState<string | null>(null);
   const [englishProgress, setEnglishProgress] = useState<{ current: number; total: number } | null>(null);
   const englishStartedForRef = useRef<string | null>(null);
+  const [ipcQuery, setIpcQuery] = useState('');
+  const [researchSection, setResearchSection] = useState<string | null>(null);
+  const [searchItems, setSearchItems] = useState<LegalSearchItem[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -83,7 +99,8 @@ export default function DocumentPage() {
       if (id && id !== 'local') {
         try {
           const bundle = await api.getDocument(id);
-          if (alive) setView(fromBundle(bundle, pdfUrl));
+          const persistedPdfUrl = bundle.document.file_ref ? api.documentPdfUrl(id) : null;
+          if (alive) setView(fromBundle(bundle, persistedPdfUrl ?? pdfUrl));
           return;
         } catch {
           /* fall through to the just-processed result below */
@@ -190,9 +207,38 @@ export default function DocumentPage() {
       imageCount: (view.original.match(/!\[[^\]]*]\(data:image\/[^)]+\)/g) ?? []).length,
     };
   }, [view]);
+  const filteredIpc = useMemo(() => {
+    const query = ipcQuery.trim().toLocaleLowerCase();
+    if (!view || !query) return view?.ipc ?? [];
+    return view.ipc.filter(
+      (section) =>
+        section.ipc.toLocaleLowerCase().includes(query) ||
+        section.summary.toLocaleLowerCase().includes(query),
+    );
+  }, [ipcQuery, view]);
 
   async function copyEnglish() {
     if (view?.english) await navigator.clipboard.writeText(view.english);
+  }
+
+  async function generateSectionResearch(section: IpcSection) {
+    if (searchLoading) return;
+    setResearchSection(section.ipc);
+    setSearchItems([]);
+    setSearchError(null);
+    setSearchLoading(true);
+    try {
+      const response = await api.generateSearchItems({
+        section_title: `IPC ${section.ipc} analysis`,
+        section_content: section.summary,
+        filing_type: view?.filingType,
+      });
+      setSearchItems(response.items);
+    } catch (err) {
+      setSearchError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSearchLoading(false);
+    }
   }
 
 function downloadMarkdown() {
@@ -281,10 +327,10 @@ function downloadMarkdown() {
           <section style={{ minWidth: 0, borderRight: `1px solid ${t.color.border}`, backgroundColor: t.color.active }}>
             <PaneHeader icon={<FileText size={15} />} title="Original PDF" detail={view.pdfUrl ? 'Browser PDF render' : 'Not available after refresh'} />
             <div style={{ height: 'calc(100vh - 104px)', padding: t.space.md, overflow: 'auto' }}>
-              {view.pages.length ? (
-                <AnnotatedPdfLayout pages={view.pages} pdfUrl={view.pdfUrl} />
-              ) : view.pdfUrl ? (
+              {view.pdfUrl ? (
                 <NativePdfFrame pdfUrl={view.pdfUrl} />
+              ) : view.pages.length ? (
+                <AnnotatedPdfLayout pages={view.pages} pdfUrl={null} />
               ) : (
                 <Empty title="Original PDF not in browser memory" text="The extraction is still available. Upload again to preview the original PDF beside it." />
               )}
@@ -362,17 +408,72 @@ function downloadMarkdown() {
                 <Stat label="IPC" value={stats.ipcCount.toLocaleString()} />
               </div>
             )}
+            <div style={{ padding: t.space.md, borderBottom: `1px solid ${t.color.border}` }}>
+              <label
+                className="flex items-center"
+                style={{
+                  gap: t.space.sm,
+                  border: `1px solid ${t.color.border}`,
+                  borderRadius: t.radius.sm,
+                  backgroundColor: t.color.raised,
+                  padding: `7px ${t.space.sm}`,
+                }}
+              >
+                <Search size={14} style={{ color: t.color.dim, flexShrink: 0 }} />
+                <input
+                  value={ipcQuery}
+                  onChange={(event) => setIpcQuery(event.target.value)}
+                  placeholder="Search section or summary"
+                  aria-label="Search IPC analysis"
+                  style={{
+                    minWidth: 0,
+                    width: '100%',
+                    border: 0,
+                    outline: 0,
+                    background: 'transparent',
+                    color: t.color.text,
+                    fontSize: t.size.ui,
+                  }}
+                />
+                {ipcQuery && (
+                  <button
+                    onClick={() => setIpcQuery('')}
+                    aria-label="Clear IPC search"
+                    style={{ border: 0, padding: 0, background: 'transparent', color: t.color.dim, cursor: 'pointer' }}
+                  >
+                    <X size={14} />
+                  </button>
+                )}
+              </label>
+            </div>
             <div style={{ flex: 1, overflow: 'auto', padding: t.space.md }}>
               {view.ipc.length === 0 ? (
                 <Empty title="No IPC sections detected" text="The document extraction still rendered; IPC summaries will appear here when the backend detects section references." />
+              ) : filteredIpc.length === 0 ? (
+                <Empty title="No matching IPC sections" text={`Nothing matched “${ipcQuery.trim()}”. Try a section number or a word from the summary.`} />
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: t.space.md }}>
-                  {view.ipc.map((section, index) => (
-                    <IpcCard key={`${section.ipc}-${index}`} section={section} priority={index === 0} />
+                  {filteredIpc.map((section, index) => (
+                    <IpcCard
+                      key={`${section.ipc}-${index}`}
+                      section={section}
+                      priority={index === 0}
+                      selected={section.ipc === researchSection}
+                      loading={searchLoading && section.ipc === researchSection}
+                      onSearch={() => generateSectionResearch(section)}
+                    />
                   ))}
                 </div>
               )}
             </div>
+            {view.ipc.length > 0 && (
+              <ResearchBar
+                section={researchSection}
+                items={searchItems}
+                loading={searchLoading}
+                error={searchError}
+              />
+            )}
           </aside>
         </main>
       )}
@@ -651,12 +752,24 @@ function TabButton({ active, label, onClick }: { active: boolean; label: string;
   );
 }
 
-function IpcCard({ section, priority }: { section: IpcSection; priority: boolean }) {
+function IpcCard({
+  section,
+  priority,
+  selected,
+  loading,
+  onSearch,
+}: {
+  section: IpcSection;
+  priority: boolean;
+  selected: boolean;
+  loading: boolean;
+  onSearch: () => void;
+}) {
   return (
     <article
       style={{
-        border: `1px solid ${priority ? t.color.accent : t.color.border}`,
-        borderLeft: `3px solid ${priority ? t.color.accent : t.color.border}`,
+        border: `1px solid ${priority || selected ? t.color.accent : t.color.border}`,
+        borderLeft: `3px solid ${priority || selected ? t.color.accent : t.color.border}`,
         borderRadius: t.radius.md,
         backgroundColor: t.color.raised,
         padding: t.space.md,
@@ -676,11 +789,105 @@ function IpcCard({ section, priority }: { section: IpcSection; priority: boolean
         >
           IPC {section.ipc}
         </span>
+        <button
+          onClick={onSearch}
+          disabled={loading}
+          className="inline-flex items-center"
+          title={`Generate contextual legal research from the IPC ${section.ipc} analysis`}
+          style={{ marginLeft: 'auto', gap: 4, border: 0, background: 'transparent', color: t.color.accentBright, fontSize: t.size.micro, cursor: 'pointer' }}
+        >
+          {loading ? <Loader2 size={12} className="animate-spin" /> : <Search size={12} />}
+          {loading ? 'Researching…' : selected ? 'Research ready' : 'Search from analysis'}
+        </button>
       </div>
       <div style={{ marginTop: t.space.sm }}>
         <Markdown>{section.summary || 'No summary returned.'}</Markdown>
       </div>
     </article>
+  );
+}
+
+function ResearchBar({
+  section,
+  items,
+  loading,
+  error,
+}: {
+  section: string | null;
+  items: LegalSearchItem[];
+  loading: boolean;
+  error: string | null;
+}) {
+  return (
+    <div
+      aria-label="Generated legal research"
+      style={{
+        borderTop: `1px solid ${t.color.border}`,
+        backgroundColor: t.color.raised,
+        padding: t.space.sm,
+        boxShadow: '0 -8px 20px rgba(0,0,0,0.12)',
+      }}
+    >
+      <div className="mono" style={{ color: t.color.dim, fontSize: t.size.micro, marginBottom: t.space.xs }}>
+        {section ? `Research from IPC ${section}` : 'Contextual legal research'}
+      </div>
+      {loading ? (
+        <div className="flex items-center" style={{ gap: t.space.xs, color: t.color.muted, fontSize: t.size.ui }}>
+          <Loader2 size={13} className="animate-spin" /> Sarvam is generating queries and searching sources…
+        </div>
+      ) : error ? (
+        <div style={{ color: 'var(--flag-warn)', fontSize: t.size.ui }}>{error}</div>
+      ) : items.length === 0 ? (
+        <div style={{ color: t.color.muted, fontSize: t.size.ui }}>
+          Choose “Search from analysis” on a section to generate fact-specific legal research.
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: t.space.sm, maxHeight: 290, overflowY: 'auto' }}>
+          {items.map((item, itemIndex) => (
+            <div
+              key={`${item.query}-${itemIndex}`}
+              style={{ border: `1px solid ${t.color.border}`, borderRadius: t.radius.sm, padding: t.space.sm }}
+            >
+              <strong style={{ display: 'block', color: t.color.text, fontSize: t.size.ui }}>{item.title}</strong>
+              <div className="mono" style={{ color: t.color.accentBright, fontSize: t.size.micro, marginTop: 3 }}>
+                {item.query}
+              </div>
+              <div style={{ color: t.color.muted, fontSize: t.size.micro, marginTop: 3 }}>{item.rationale}</div>
+              <div style={{ display: 'flex', gap: t.space.xs, overflowX: 'auto', marginTop: t.space.xs }}>
+                {item.results.length === 0 ? (
+                  <span style={{ color: t.color.dim, fontSize: t.size.micro }}>No source results returned</span>
+                ) : (
+                  item.results.map((result) => (
+                    <a
+                      key={result.url}
+                      href={result.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={result.snippet}
+                      className="inline-flex items-center"
+                      style={{
+                        flexShrink: 0,
+                        gap: 4,
+                        border: `1px solid ${t.color.accent}`,
+                        borderRadius: 999,
+                        color: t.color.accentBright,
+                        backgroundColor: t.color.active,
+                        padding: `5px ${t.space.sm}`,
+                        fontSize: t.size.micro,
+                        textDecoration: 'none',
+                      }}
+                    >
+                      {result.source === 'indian_kanoon' ? 'IK' : 'Web'} · {result.title.slice(0, 34)}
+                      <ExternalLink size={10} />
+                    </a>
+                  ))
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

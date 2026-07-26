@@ -25,6 +25,8 @@ Frontend: `cd frontend && npm run dev` → http://localhost:3000 (upload a PDF).
 | `POST` | `/api/documents/english` | generate English Markdown from `{raw_extraction, pages, document_id}` using Sarvam chat completions |
 | `POST` | `/api/documents/english/stream` | same English generation as NDJSON events: `start`, `chunk_start`, repeated `delta`, then `done` with stitched `eng_extraction` |
 | `GET`  | `/api/documents/{id}` | persisted document + digitizations/extractions/translations |
+| `GET`  | `/api/documents/{id}/pdf` | stream the original PDF from private Supabase Storage |
+| `POST` | `/api/documents/search-items` | use Sarvam to derive contextual legal queries from an analysis section, then search Indian Kanoon + Google CSE |
 | `POST` | `/api/cases…`, `/ask` | workbench teammate's surface (in-memory store) — left intact |
 
 ## How it works
@@ -45,6 +47,15 @@ Project **Samajh** (`smngfmejqgyjkhpozcwr`, ap-south-1). Tables `documents` ·
 `digitizations` · `extractions` · `translations` (`app/repositories.py`). Persistence in
 `/documents/process` is **best-effort** — a DB hiccup never fails the request. RLS is on
 with **open demo policies**; tighten + use the service-role key before production.
+
+Original PDFs require a private Storage bucket named `documents` (override with
+`SUPABASE_DOCUMENTS_BUCKET`). Use `SUPABASE_SERVICE_ROLE_KEY` for backend
+uploads; the object path is persisted in `documents.file_ref`.
+
+Contextual legal research mirrors MiniHarvey's provider contract:
+`INDIAN_KANOON_API_TOKEN`, `GOOGLE_API_KEY`, `GOOGLE_SEARCH_CX`, and
+`MAX_SEARCH_RESULTS`. `SARVAM_API_KEY` rewrites each selected analysis section
+into fact-specific research queries before the providers are searched.
 
 ## CLI
 
