@@ -172,9 +172,7 @@ def test_chat_with_document_persists_user_and_assistant(monkeypatch):
     assert calls["messages"][1]["role"] == "assistant"
 
 
-def test_chat_with_document_uses_page_json_when_content_is_empty(monkeypatch):
-    captured = {}
-
+def test_chat_with_document_requires_english_translation(monkeypatch):
     monkeypatch.setattr(
         routes.repo,
         "get_document_bundle",
@@ -200,29 +198,14 @@ def test_chat_with_document_uses_page_json_when_content_is_empty(monkeypatch):
             "extractions": [],
         },
     )
-    monkeypatch.setattr(
-        routes.repo,
-        "create_document_conversation",
-        lambda **kwargs: {"id": "convo-json", "document_id": kwargs["document_id"], "title": kwargs["title"]},
-    )
-    monkeypatch.setattr(routes.repo, "list_document_chat_messages", lambda conversation_id, limit=50: [])
-    monkeypatch.setattr(
-        routes.repo,
-        "insert_document_chat_message",
-        lambda **kwargs: {"id": "msg", **kwargs},
-    )
 
-    def answer(**kwargs):
-        captured.update(kwargs)
-        return "It mentions Section 420 IPC."
-
-    monkeypatch.setattr(routes, "_answer_document_question", answer)
-
-    response = routes.chat_with_document("doc-json", routes.DocumentChatIn(message="Which IPC section?"))
-
-    assert response.answer == "It mentions Section 420 IPC."
-    assert "Section 420 IPC" in captured["context"]
-
+    try:
+        routes.chat_with_document("doc-json", routes.DocumentChatIn(message="Which IPC section?"))
+    except routes.HTTPException as exc:
+        assert exc.status_code == 400
+        assert "English translation" in exc.detail
+    else:
+        raise AssertionError("chat should require English translation")
 
 def test_processing_start_returns_id_before_background_ocr(monkeypatch):
     calls = {}

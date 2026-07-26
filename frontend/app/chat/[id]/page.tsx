@@ -61,14 +61,8 @@ export default function DocumentChatPage() {
   const fileName = bundle?.document.file_name ?? 'Document chat';
   const contextState = useMemo(() => {
     const hasEnglish = Boolean(bundle?.translations?.[0]?.translated_text);
-    const hasRaw = Boolean(bundle?.digitizations?.[0]?.content);
-    const hasPageJson = Boolean(bundle?.digitizations?.some((digitization) => Array.isArray(digitization.content_json) && digitization.content_json.length > 0));
-    const hasMetadata = Boolean(bundle?.extractions?.some((extraction) => Object.keys(extraction.fields ?? {}).length > 0));
     if (hasEnglish) return 'English translation loaded';
-    if (hasRaw) return 'Raw extraction loaded';
-    if (hasPageJson) return 'Page extraction loaded';
-    if (hasMetadata) return 'Legal metadata loaded';
-    return 'No context available';
+    return 'No English translation available';
   }, [bundle]);
 
   async function sendMessage() {
