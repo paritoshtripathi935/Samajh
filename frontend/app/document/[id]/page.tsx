@@ -307,7 +307,7 @@ function downloadMarkdown() {
         )}
         <ToolbarButton onClick={copyEnglish} disabled={!view?.english} icon={<Clipboard size={15} />} label="Copy English" />
         <ToolbarButton onClick={downloadMarkdown} disabled={!view} icon={<Download size={15} />} label="Download Markdown" />
-        <ToolbarButton onClick={() => router.push('/')} icon={<Send size={15} />} label="Submit" primary />
+        <ToolbarButton onClick={() => router.push('/dashboard')} icon={<Send size={15} />} label="Submit" primary />
         <ThemeToggle />
       </header>
 

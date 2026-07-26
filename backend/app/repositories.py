@@ -47,6 +47,18 @@ def get_document(document_id: str) -> Optional[Dict[str, Any]]:
     return res.data[0] if res.data else None
 
 
+def list_documents(limit: int = 50) -> List[Dict[str, Any]]:
+    res = (
+        supabase()
+        .table("documents")
+        .select("*")
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return res.data or []
+
+
 def upload_document_file(*, document_id: str, file_name: str, content: bytes) -> str:
     """Upload an original filing and return its stable Storage object path."""
     safe_name = file_name.replace("\\", "_").replace("/", "_") or "document.pdf"

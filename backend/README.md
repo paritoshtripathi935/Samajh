@@ -21,6 +21,7 @@ Frontend: `cd frontend && npm run dev` → http://localhost:3000 (upload a PDF).
 | Method | Path | Does |
 |---|---|---|
 | `GET`  | `/health` | liveness |
+| `GET`  | `/api/documents` | recent uploaded filings for the dashboard |
 | `POST` | `/api/documents/process` | upload PDF → digitise → coordinate pages → IPC summaries → persist. Returns `{raw_extraction, pages, ipc_sections[], document_id, filing_type}` |
 | `POST` | `/api/documents/english` | generate English Markdown from `{raw_extraction, pages, document_id}` using Sarvam chat completions |
 | `POST` | `/api/documents/english/stream` | same English generation as NDJSON events: `start`, `chunk_start`, repeated `delta`, then `done` with stitched `eng_extraction` |
@@ -51,6 +52,11 @@ with **open demo policies**; tighten + use the service-role key before productio
 Original PDFs require a private Storage bucket named `documents` (override with
 `SUPABASE_DOCUMENTS_BUCKET`). Use `SUPABASE_SERVICE_ROLE_KEY` for backend
 uploads; the object path is persisted in `documents.file_ref`.
+
+Next ingestion tables are defined in `supabase/ingestion_schema.sql`:
+`document_vector_chunks` for document-level retrieval and
+`chargesheet_structured_extractions` for structured chargesheet facts. It also
+adds `vector_ingestion_status` and `structured_ingestion_status` to `documents`.
 
 Contextual legal research mirrors MiniHarvey's provider contract:
 `INDIAN_KANOON_API_TOKEN`, `GOOGLE_API_KEY`, `GOOGLE_SEARCH_CX`, and

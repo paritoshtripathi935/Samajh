@@ -87,3 +87,29 @@ def test_get_document_pdf_streams_private_storage_object(monkeypatch):
     assert response.body == b"%PDF-test"
     assert response.media_type == "application/pdf"
     assert response.headers["content-disposition"] == 'inline; filename="filing.pdf"'
+
+
+def test_list_documents_returns_dashboard_rows(monkeypatch):
+    monkeypatch.setattr(
+        routes.repo,
+        "list_documents",
+        lambda limit: [
+            {
+                "id": "doc-4",
+                "file_name": "filing.pdf",
+                "filing_type": "chargesheet",
+                "source_language": "hi-IN",
+                "page_count": 5,
+                "status": "ready",
+                "file_ref": "doc-4/filing.pdf",
+                "created_at": "2026-07-26T09:00:00Z",
+                "updated_at": "2026-07-26T09:01:00Z",
+            }
+        ],
+    )
+
+    response = routes.list_documents(limit=500)
+
+    assert len(response.documents) == 1
+    assert response.documents[0].id == "doc-4"
+    assert response.documents[0].status == "ready"

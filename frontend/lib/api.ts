@@ -158,6 +158,20 @@ export interface DocumentBundle {
   }[];
 }
 
+export interface DocumentListItem {
+  id: string;
+  file_name: string;
+  filing_type: string;
+  source_language: string | null;
+  page_count: number | null;
+  status: string;
+  vector_ingestion_status?: string | null;
+  structured_ingestion_status?: string | null;
+  file_ref: string | null;
+  created_at: string;
+  updated_at: string | null;
+}
+
 export const api = {
   health: () => request<{ status: string }>(`/health`),
 
@@ -237,6 +251,10 @@ export const api = {
 
   /** The persisted document + its digitizations / extractions / translations. */
   getDocument: (documentId: string) => request<DocumentBundle>(`/api/documents/${documentId}`),
+
+  /** Recent uploaded filings for the dashboard. */
+  listDocuments: (opts?: { limit?: number }) =>
+    request<{ documents: DocumentListItem[] }>(`/api/documents?limit=${opts?.limit ?? 50}`),
 
   /** Backend-served URL for the original PDF in private Supabase Storage. */
   documentPdfUrl: (documentId: string) => `${BASE}/api/documents/${documentId}/pdf`,

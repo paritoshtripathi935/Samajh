@@ -51,6 +51,24 @@ class ProcessDocumentOut(BaseModel):
     filing_type: Optional[str] = None
 
 
+class DocumentListItemOut(BaseModel):
+    id: str
+    file_name: str
+    filing_type: str
+    source_language: Optional[str] = None
+    page_count: Optional[int] = None
+    status: str
+    vector_ingestion_status: Optional[str] = None
+    structured_ingestion_status: Optional[str] = None
+    file_ref: Optional[str] = None
+    created_at: str
+    updated_at: Optional[str] = None
+
+
+class DocumentListOut(BaseModel):
+    documents: list[DocumentListItemOut]
+
+
 class EnglishExtractionIn(BaseModel):
     raw_extraction: Optional[str] = None
     pages: Optional[list[dict[str, Any]]] = None
@@ -93,6 +111,19 @@ class LegalSearchItemsOut(BaseModel):
 
 
 # ── MVP: digitise + coordinates first, English generation second ────────────
+
+@router.get("/documents", response_model=DocumentListOut)
+def list_documents(limit: int = 50):
+    """Return recently uploaded filings for the dashboard."""
+    capped_limit = max(1, min(limit, 100))
+    logger.info("document.list.start limit=%s", capped_limit)
+    try:
+        documents = repo.list_documents(limit=capped_limit)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("document.list.failed")
+        raise HTTPException(502, f"Supabase document list failed: {exc}") from exc
+    logger.info("document.list.done count=%s", len(documents))
+    return DocumentListOut(documents=documents)
 
 @router.post("/documents/process", response_model=ProcessDocumentOut)
 def process_document(
