@@ -23,6 +23,27 @@ def test_stream_parser_accepts_sse_without_space():
     assert _stream_delta_content({"choices": [{"delta": {"content": None, "reasoning_content": "hidden"}}]}) == ""
 
 
+def test_chat_retries_empty_completion(monkeypatch):
+    calls = {"count": 0}
+
+    class Completions:
+        def __call__(self, **kwargs):
+            calls["count"] += 1
+            content = "" if calls["count"] == 1 else "Grounded answer"
+            message = type("Message", (), {"content": content})()
+            choice = type("Choice", (), {"message": message})()
+            return type("Response", (), {"choices": [choice]})()
+
+    client = type("Client", (), {"chat": type("Chat", (), {"completions": Completions()})()})()
+    monkeypatch.setattr(sarvam, "_client", lambda: client)
+    monkeypatch.setattr(sarvam.time, "sleep", lambda seconds: None)
+
+    result = sarvam.chat(messages=[{"role": "user", "content": "Question"}], model=sarvam.DOCUMENT_CHAT_MODEL)
+
+    assert result == "Grounded answer"
+    assert calls["count"] == 2
+
+
 def test_latin_only_source_is_passed_through_without_translate_request(monkeypatch):
     monkeypatch.setattr(
         sarvam,

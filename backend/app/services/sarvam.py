@@ -337,17 +337,23 @@ def chat(
     max_tokens: Optional[int] = None,
 ) -> str:
     client = _client()
-    logger.info("sarvam.chat.start model=%s messages=%s", model, len(messages))
-    resp = client.chat.completions(
-        messages=messages, model=model, temperature=temperature, max_tokens=max_tokens
-    )
-    try:
-        content = resp.choices[0].message.content or ""
-        logger.info("sarvam.chat.done model=%s chars=%s", model, len(content))
-        return content
-    except (AttributeError, IndexError):
-        logger.warning("sarvam.chat.empty_response model=%s", model)
-        return ""
+    max_attempts = 3
+    logger.info("sarvam.chat.start model=%s messages=%s max_attempts=%s", model, len(messages), max_attempts)
+    for attempt in range(1, max_attempts + 1):
+        resp = client.chat.completions(
+            messages=messages, model=model, temperature=temperature, max_tokens=max_tokens
+        )
+        try:
+            content = (resp.choices[0].message.content or "").strip()
+        except (AttributeError, IndexError):
+            content = ""
+        if content:
+            logger.info("sarvam.chat.done model=%s chars=%s attempt=%s", model, len(content), attempt)
+            return content
+        logger.warning("sarvam.chat.empty_response model=%s attempt=%s/%s", model, attempt, max_attempts)
+        if attempt < max_attempts:
+            time.sleep(0.7 * attempt)
+    return ""
 
 
 _DATA_URI_IMG_RE = re.compile(r"!\[[^\]]*\]\(\s*data:[^)]*\)")
