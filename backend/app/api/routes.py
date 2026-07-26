@@ -151,10 +151,10 @@ def generate_english(body: EnglishExtractionIn):
 
 @router.post("/documents/english/stream")
 def stream_english(body: EnglishExtractionIn):
-    """Stream English Markdown as newline-delimited JSON chunks.
+    """Stream English Markdown as newline-delimited JSON events.
 
-    Each `chunk` event is a completed Sarvam chat-completion chunk, not token
-    streaming. The final `done` event includes the stitched Markdown.
+    Each `delta` event is emitted from Sarvam's `stream=True` chat completion.
+    The final `done` event includes the stitched Markdown.
     """
     start = time.perf_counter()
     logger.info(
@@ -170,7 +170,8 @@ def stream_english(body: EnglishExtractionIn):
         translated: list[str] = []
         try:
             first = True
-            for chunk in sarvam.iter_english_with_chat(
+            current_chunk_index = 0
+            for event in sarvam.iter_english_stream_with_chat(
                 raw_text=source_text,
                 pages=pages,
                 source_language=body.source_language,
@@ -180,23 +181,37 @@ def stream_english(body: EnglishExtractionIn):
                         {
                             "type": "start",
                             "document_id": body.document_id,
-                            "chunks": chunk["total"],
+                            "chunks": event["total"],
                             "model": sarvam.CHAT_TRANSLATION_MODEL,
                         }
                     )
                     first = False
-                text = str(chunk["text"])
-                translated.append(text)
+                index = int(event["index"])
+                if index != current_chunk_index:
+                    if translated and not translated[-1].endswith("\n\n"):
+                        separator = "\n\n"
+                        translated.append(separator)
+                        yield _json_line(
+                            {
+                                "type": "delta",
+                                "index": index,
+                                "total": event["total"],
+                                "text": separator,
+                            }
+                        )
+                    current_chunk_index = index
+                delta = str(event["delta"])
+                translated.append(delta)
                 yield _json_line(
                     {
-                        "type": "chunk",
-                        "index": chunk["index"],
-                        "total": chunk["total"],
-                        "text": text,
+                        "type": "delta",
+                        "index": index,
+                        "total": event["total"],
+                        "text": delta,
                     }
                 )
 
-            english = "\n\n".join(part.strip() for part in translated if part.strip())
+            english = "".join(translated).strip()
             if not translated:
                 yield _json_line(
                     {

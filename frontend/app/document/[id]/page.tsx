@@ -121,9 +121,9 @@ export default function DocumentPage() {
       setEnglishLoading(true);
       setEnglishError(null);
       setEnglishProgress(null);
-      const parts: string[] = [];
       try {
         let finalEnglish = '';
+        let streamedEnglish = '';
         await api.streamEnglish(
           {
             raw_extraction: view.original,
@@ -137,11 +137,10 @@ export default function DocumentPage() {
               setEnglishProgress({ current: 0, total: event.chunks });
               return;
             }
-            if (event.type === 'chunk') {
-              parts[event.index - 1] = event.text;
-              const stitched = parts.filter(Boolean).join('\n\n');
+            if (event.type === 'delta') {
+              streamedEnglish += event.text;
               setEnglishProgress({ current: event.index, total: event.total });
-              setView((current) => (current ? { ...current, english: stitched } : current));
+              setView((current) => (current ? { ...current, english: streamedEnglish } : current));
               return;
             }
             if (event.type === 'done') {

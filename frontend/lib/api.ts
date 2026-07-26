@@ -91,7 +91,7 @@ export interface EnglishResult {
 
 export type EnglishStreamEvent =
   | { type: 'start'; chunks: number; document_id: string | null; model?: string }
-  | { type: 'chunk'; index: number; total: number; text: string }
+  | { type: 'delta'; index: number; total: number; text: string }
   | { type: 'done'; document_id: string | null; eng_extraction: string }
   | { type: 'error'; message: string };
 
@@ -155,7 +155,7 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  /** MVP step 2, streamed chunk-by-chunk as NDJSON. */
+  /** MVP step 2, streamed token-by-token from Sarvam as NDJSON. */
   streamEnglish: async (
     body: EnglishRequest,
     onEvent: (event: EnglishStreamEvent) => void,

@@ -445,11 +445,7 @@ def iter_english_with_chat(
     pages: Optional[List[Dict[str, Any]]] = None,
     source_language: str = "auto",
 ) -> Iterator[Dict[str, Any]]:
-    """Yield completed English Markdown chunks in document order.
-
-    This is chunk-level streaming: each Sarvam chat completion returns a full
-    page-packed chunk, then the API can immediately flush it to the browser.
-    """
+    """Yield completed English Markdown chunks in document order."""
     chunks = _english_source_chunks(raw_text=raw_text, pages=pages)
     if not chunks:
         return
@@ -474,6 +470,62 @@ def iter_english_with_chat(
             "total": len(chunks),
             "text": text,
         }
+
+
+def iter_english_stream_with_chat(
+    *,
+    raw_text: str,
+    pages: Optional[List[Dict[str, Any]]] = None,
+    source_language: str = "auto",
+) -> Iterator[Dict[str, Any]]:
+    """Yield token deltas from Sarvam streaming chat completions.
+
+    We still chunk by page/layout first so large documents, tables, and page
+    ordering follow the same boundaries as the non-streaming endpoint.
+    """
+    chunks = _english_source_chunks(raw_text=raw_text, pages=pages)
+    if not chunks:
+        return
+
+    logger.info(
+        "sarvam.english_chat.stream.chunked chunks=%s raw_chars=%s pages=%s",
+        len(chunks),
+        len(raw_text),
+        len(pages or []),
+    )
+    for index, chunk in enumerate(chunks, start=1):
+        logger.info("sarvam.english_chat.stream.chunk.start index=%s chars=%s", index, len(chunk))
+        text_parts: list[str] = []
+        emitted = False
+        for delta in _english_chat_completion_stream(chunk, index=index, total=len(chunks), source_language=source_language):
+            emitted = True
+            text_parts.append(delta)
+            yield {
+                "index": index,
+                "total": len(chunks),
+                "delta": delta,
+            }
+
+        text = "".join(text_parts)
+        if not emitted or not text.strip():
+            logger.warning(
+                "sarvam.english_chat.stream.empty_chunk index=%s chars=%s retrying_non_stream",
+                index,
+                len(chunk),
+            )
+            text = _english_chat_completion_with_fallback(
+                chunk,
+                index=index,
+                total=len(chunks),
+                source_language=source_language,
+            )
+            yield {
+                "index": index,
+                "total": len(chunks),
+                "delta": text,
+            }
+
+        logger.info("sarvam.english_chat.stream.chunk.done index=%s output_chars=%s", index, len(text))
 
 
 def _english_source_chunks(
@@ -516,6 +568,51 @@ def _pack_chunks(parts: list[str], max_chars: int) -> list[str]:
 
 
 def _english_chat_completion(chunk: str, *, index: int, total: int, source_language: str) -> str:
+    messages = _english_messages(chunk=chunk, index=index, total=total, source_language=source_language)
+    return chat(
+        messages=messages,
+        model=CHAT_TRANSLATION_MODEL,
+        temperature=0.0,
+        max_tokens=CHAT_TRANSLATION_MAX_TOKENS,
+    )
+
+
+def _english_chat_completion_stream(chunk: str, *, index: int, total: int, source_language: str) -> Iterator[str]:
+    client = _client()
+    logger.info("sarvam.chat.stream.start model=%s chunk_index=%s", CHAT_TRANSLATION_MODEL, index)
+    try:
+        stream = client.chat.completions(
+            messages=_english_messages(chunk=chunk, index=index, total=total, source_language=source_language),
+            model=CHAT_TRANSLATION_MODEL,
+            temperature=0.0,
+            max_tokens=CHAT_TRANSLATION_MAX_TOKENS,
+            stream=True,
+        )
+        for chunk_event in stream:
+            content = _stream_delta_content(chunk_event)
+            if content:
+                yield content
+    except Exception as exc:  # noqa: BLE001 - normalize SDK exceptions at our boundary
+        raise SarvamError(str(exc)) from exc
+    finally:
+        logger.info("sarvam.chat.stream.done model=%s chunk_index=%s", CHAT_TRANSLATION_MODEL, index)
+
+
+def _stream_delta_content(chunk_event: Any) -> str:
+    choices = (
+        chunk_event.get("choices")
+        if isinstance(chunk_event, dict)
+        else getattr(chunk_event, "choices", None)
+    )
+    if not choices:
+        return ""
+    choice = choices[0]
+    delta = choice.get("delta") if isinstance(choice, dict) else getattr(choice, "delta", None)
+    content = delta.get("content") if isinstance(delta, dict) else getattr(delta, "content", None)
+    return str(content) if content else ""
+
+
+def _english_messages(chunk: str, *, index: int, total: int, source_language: str) -> List[Dict[str, str]]:
     system = (
         "You are a careful Indian legal document translator and editor. "
         "Convert the provided OCR/digitized legal filing text into clear English Markdown. "
@@ -529,12 +626,7 @@ def _english_chat_completion(chunk: str, *, index: int, total: int, source_langu
         f"Chunk {index} of {total}. Return only the English Markdown for this chunk.\n\n"
         f"{chunk}"
     )
-    return chat(
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        model=CHAT_TRANSLATION_MODEL,
-        temperature=0.0,
-        max_tokens=CHAT_TRANSLATION_MAX_TOKENS,
-    )
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
 def _english_chat_completion_with_fallback(chunk: str, *, index: int, total: int, source_language: str) -> str:
