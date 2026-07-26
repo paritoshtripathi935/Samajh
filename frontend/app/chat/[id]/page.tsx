@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { AlertTriangle, ArrowLeft, FileText, Loader2, MessageCircle, Send, Scale } from 'lucide-react';
+import Markdown from '@/components/Markdown';
 import ThemeToggle from '@/components/ThemeToggle';
 import { api, type DocumentBundle, type DocumentChatMessage, type DocumentConversation } from '@/lib/api';
 import { t } from '@/lib/design/tokens';
@@ -261,12 +262,11 @@ function ChatBubble({ message, muted = false }: { message: DocumentChatMessage; 
           backgroundColor: isUser ? 'rgba(212, 160, 23, 0.14)' : t.color.raised,
           color: muted ? t.color.dim : t.color.text,
           padding: t.space.md,
-          whiteSpace: 'pre-wrap',
           lineHeight: 1.6,
           fontSize: t.size.ui,
         }}
       >
-        {message.content}
+        <Markdown>{message.content}</Markdown>
       </div>
     </div>
   );
