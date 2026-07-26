@@ -821,7 +821,7 @@ def _answer_document_question(
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
         model=sarvam.DOCUMENT_CHAT_MODEL,
         temperature=0.1,
-        max_tokens=1600,
+        max_tokens=sarvam.DOCUMENT_CHAT_MAX_TOKENS,
     )
 
 
