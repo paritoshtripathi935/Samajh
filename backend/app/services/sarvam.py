@@ -35,6 +35,7 @@ Verified against docs.sarvam.ai + the SDK surface (v0.1.28), 2026-07-26:
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 import zipfile
 from dataclasses import dataclass
@@ -262,14 +263,28 @@ def translate(
     return getattr(resp, "translated_text", "") or ""
 
 
+_DATA_URI_IMG_RE = re.compile(r"!\[[^\]]*\]\(\s*data:[^)]*\)")
+_BARE_DATA_URI_RE = re.compile(r"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+")
+
+
+def strip_data_uris(md: str) -> str:
+    """Drop embedded base64 images from digitised Markdown. They must never be
+    sent to the translator (they pollute the output) and add nothing to prose."""
+    md = _DATA_URI_IMG_RE.sub("", md)
+    md = _BARE_DATA_URI_RE.sub("", md)
+    return md
+
+
 def translate_to_english(input_text: str, source_language_code: str) -> str:
-    """Translate digitised Markdown into English, chunking long legal filings."""
+    """Translate digitised Markdown into English, chunking long legal filings.
+    Embedded base64 images are stripped first (the scan stays on the original)."""
     if not input_text.strip():
         return ""
+    text = strip_data_uris(input_text)
     if source_language_code.lower() == "en-in":
-        return input_text
+        return text
 
-    chunks = _chunk_text(input_text, max_chars=TRANSLATE_CHUNK_SIZE)
+    chunks = _chunk_text(text, max_chars=TRANSLATE_CHUNK_SIZE)
     translated = [
         translate(
             chunk,

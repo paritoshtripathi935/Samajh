@@ -139,3 +139,70 @@ body {
   border-bottom: 1px dashed var(--flag-warn);
   cursor: help;
 }
+
+/* ──────────────────────────────────────────────────────────────
+   Rendered Markdown — the digitised original + the translation.
+   Handles headings, tables, and embedded (data-URI) scan images.
+   ──────────────────────────────────────────────────────────── */
+.md {
+  color: var(--text-bright);
+  font-size: 14px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.md > :first-child { margin-top: 0; }
+.md h1, .md h2, .md h3, .md h4 {
+  font-family: 'Source Serif 4', Georgia, 'Times New Roman', serif;
+  color: var(--text);
+  line-height: 1.3;
+  margin: 1.1em 0 0.5em;
+}
+.md h1 { font-size: 20px; }
+.md h2 { font-size: 17px; }
+.md h3 { font-size: 15px; }
+.md p { margin: 0 0 0.8em; }
+.md ul, .md ol { margin: 0 0 0.8em; padding-left: 1.4em; }
+.md li { margin: 0.2em 0; }
+.md a { color: var(--accent-bright); text-decoration: underline; }
+.md strong { color: var(--text); font-weight: 600; }
+.md img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 0.5em 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.md code {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 0.88em;
+  background: var(--surface-hover);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.md pre { background: var(--surface-hover); padding: 12px; border-radius: 8px; overflow-x: auto; }
+.md pre code { background: none; padding: 0; }
+.md blockquote {
+  margin: 0 0 0.8em;
+  padding-left: 12px;
+  border-left: 3px solid var(--border);
+  color: var(--text-muted);
+}
+.md hr { border: none; border-top: 1px solid var(--border); margin: 1em 0; }
+/* Tables scroll horizontally instead of blowing out the panel width. */
+.md table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 0 0 0.8em;
+  font-size: 13px;
+}
+.md th, .md td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.md th { background: var(--surface-hover); font-weight: 600; color: var(--text); }

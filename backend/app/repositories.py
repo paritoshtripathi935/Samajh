@@ -120,7 +120,7 @@ def get_document_bundle(document_id: str) -> Optional[Dict[str, Any]]:
     if not doc:
         return None
     sb = supabase()
-    digs = sb.table("digitizations").select("id,output_format,sarvam_job_id,created_at").eq("document_id", document_id).order("created_at", desc=True).execute().data
+    digs = sb.table("digitizations").select("id,output_format,content,content_json,sarvam_job_id,created_at").eq("document_id", document_id).order("created_at", desc=True).execute().data
     exts = sb.table("extractions").select("*").eq("document_id", document_id).order("created_at", desc=True).execute().data
-    trans = sb.table("translations").select("id,target_language,source_language,model,created_at").eq("document_id", document_id).order("created_at", desc=True).execute().data
+    trans = sb.table("translations").select("id,target_language,source_language,translated_text,model,created_at").eq("document_id", document_id).order("created_at", desc=True).execute().data
     return {"document": doc, "digitizations": digs, "extractions": exts, "translations": trans}

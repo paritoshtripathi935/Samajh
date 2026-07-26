@@ -62,6 +62,41 @@ export interface ProcessResult {
   filing_type: string | null;
 }
 
+export interface DocumentBundle {
+  document: {
+    id: string;
+    file_name: string;
+    filing_type: string;
+    source_language: string | null;
+    page_count: number | null;
+    status: string;
+    created_at: string;
+  };
+  digitizations: {
+    id: string;
+    output_format: string;
+    content: string | null;
+    content_json: unknown;
+    sarvam_job_id: string | null;
+    created_at: string;
+  }[];
+  extractions: {
+    id: string;
+    filing_type: string | null;
+    fields: { ipc_sections?: IpcSection[] } & Record<string, unknown>;
+    model: string | null;
+    created_at: string;
+  }[];
+  translations: {
+    id: string;
+    target_language: string;
+    source_language: string | null;
+    translated_text: string;
+    model: string | null;
+    created_at: string;
+  }[];
+}
+
 export const api = {
   health: () => request<{ status: string }>(`/health`),
 
@@ -74,5 +109,5 @@ export const api = {
   },
 
   /** The persisted document + its digitizations / extractions / translations. */
-  getDocument: (documentId: string) => request<unknown>(`/api/documents/${documentId}`),
+  getDocument: (documentId: string) => request<DocumentBundle>(`/api/documents/${documentId}`),
 };

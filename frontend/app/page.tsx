@@ -1,9 +1,10 @@
 'use client';
 
 import { useRef, useState } from 'react';
-import { Scale, Upload, FileText, Languages, Gavel, Loader2, AlertTriangle } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { Scale, Upload, FileText, Languages, Loader2, AlertTriangle } from 'lucide-react';
 import ThemeToggle from '@/components/ThemeToggle';
-import { api, ApiError, type ProcessResult } from '@/lib/api';
+import { api, ApiError } from '@/lib/api';
 import { t } from '@/lib/design/tokens';
 
 const LANGS = [
@@ -17,30 +18,35 @@ const LANGS = [
 ];
 
 export default function Home() {
+  const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
   const [language, setLanguage] = useState('hi-IN');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<ProcessResult | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
   async function run() {
     if (!file || loading) return;
     setLoading(true);
     setError(null);
-    setResult(null);
     try {
-      setResult(await api.processDocument(file, { language }));
+      const result = await api.processDocument(file, { language });
+      // Stash for an instant render on the results page (backend fetch is the
+      // shareable fallback). Guard against sessionStorage quota (big scans).
+      try {
+        sessionStorage.setItem('samajh:lastResult', JSON.stringify({ ...result, fileName: file.name }));
+      } catch {
+        /* quota — the results page will fetch from the backend by id */
+      }
+      router.push(`/document/${result.document_id ?? 'local'}`);
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e));
-    } finally {
+      setError(e instanceof ApiError || e instanceof Error ? e.message : String(e));
       setLoading(false);
     }
   }
 
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
-      {/* Header */}
       <header
         className="flex items-center"
         style={{
@@ -65,7 +71,7 @@ export default function Home() {
         <ThemeToggle />
       </header>
 
-      <main style={{ padding: t.space.lg, maxWidth: 1100, width: '100%', margin: '0 auto' }}>
+      <main style={{ padding: t.space.lg, maxWidth: 900, width: '100%', margin: '0 auto' }}>
         <h1
           className="serif"
           style={{ fontSize: t.size.h1, fontWeight: t.weight.bold, color: t.color.text, margin: 0, letterSpacing: '-0.01em' }}
@@ -77,7 +83,6 @@ export default function Home() {
           English, and summarises every IPC section it cites.
         </p>
 
-        {/* Upload card */}
         <div
           style={{
             marginTop: t.space.lg,
@@ -185,114 +190,7 @@ export default function Home() {
             <span>{error}</span>
           </div>
         )}
-
-        {result && <Results result={result} />}
       </main>
     </div>
-  );
-}
-
-function Results({ result }: { result: ProcessResult }) {
-  return (
-    <div style={{ marginTop: t.space.lg }}>
-      <div className="flex items-center" style={{ gap: t.space.sm, marginBottom: t.space.md, flexWrap: 'wrap' }}>
-        {result.filing_type && (
-          <span
-            className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium border"
-            style={{ borderColor: 'var(--accent)', color: 'var(--accent-bright)', backgroundColor: 'var(--surface-active)' }}
-          >
-            {result.filing_type}
-          </span>
-        )}
-        {result.document_id && (
-          <span className="mono" style={{ fontSize: t.size.micro, color: t.color.dim }}>
-            saved · {result.document_id.slice(0, 8)}
-          </span>
-        )}
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: t.space.md }}>
-        <Panel icon={<FileText size={15} />} title="Digitised (original)">
-          <pre className="answer-prose" style={preStyle}>
-            {result.raw_extraction || '—'}
-          </pre>
-        </Panel>
-        <Panel icon={<Languages size={15} />} title="English">
-          <pre className="answer-prose" style={preStyle}>
-            {result.eng_extraction || '—'}
-          </pre>
-        </Panel>
-      </div>
-
-      <Panel icon={<Gavel size={15} />} title={`IPC sections (${result.ipc_sections.length})`} style={{ marginTop: t.space.md }}>
-        {result.ipc_sections.length === 0 ? (
-          <p style={{ fontSize: t.size.ui, color: t.color.dim, margin: 0 }}>No IPC sections detected.</p>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: t.space.md }}>
-            {result.ipc_sections.map((s) => (
-              <div key={s.ipc} style={{ display: 'flex', gap: t.space.md, alignItems: 'flex-start' }}>
-                <span
-                  className="mono"
-                  style={{
-                    flexShrink: 0,
-                    fontSize: t.size.ui,
-                    fontWeight: t.weight.semibold,
-                    color: 'var(--accent-bright)',
-                    backgroundColor: 'var(--surface-active)',
-                    border: `1px solid var(--accent)`,
-                    borderRadius: t.radius.sm,
-                    padding: `2px ${t.space.sm}`,
-                  }}
-                >
-                  §{s.ipc}
-                </span>
-                <p className="answer-prose" style={{ margin: 0, fontSize: t.size.body }}>
-                  {s.summary}
-                </p>
-              </div>
-            ))}
-          </div>
-        )}
-      </Panel>
-    </div>
-  );
-}
-
-const preStyle: React.CSSProperties = {
-  margin: 0,
-  whiteSpace: 'pre-wrap',
-  wordBreak: 'break-word',
-  maxHeight: 420,
-  overflowY: 'auto',
-  fontSize: '13.5px',
-};
-
-function Panel({
-  icon,
-  title,
-  children,
-  style,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  children: React.ReactNode;
-  style?: React.CSSProperties;
-}) {
-  return (
-    <section
-      style={{
-        backgroundColor: t.color.raised,
-        border: `1px solid ${t.color.border}`,
-        borderRadius: t.radius.lg,
-        padding: t.space.md,
-        ...style,
-      }}
-    >
-      <div className="flex items-center" style={{ gap: t.space.sm, color: t.color.muted, marginBottom: t.space.md }}>
-        {icon}
-        <span style={{ fontSize: t.size.ui, fontWeight: t.weight.semibold }}>{title}</span>
-      </div>
-      {children}
-    </section>
   );
 }
