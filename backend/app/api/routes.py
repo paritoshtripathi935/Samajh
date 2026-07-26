@@ -454,6 +454,8 @@ def list_document_conversations(document_id: str):
 
 @router.get("/conversations/{conversation_id}/messages", response_model=ChatMessagesOut)
 def list_conversation_messages(conversation_id: str):
+    if conversation_id.startswith("local-"):
+        return ChatMessagesOut(messages=[])
     conversation = repo.get_document_conversation(conversation_id)
     if not conversation:
         raise HTTPException(404, "conversation not found")
@@ -750,6 +752,12 @@ def _section_sort_key(section: str) -> tuple[int, str]:
 
 def _resolve_conversation(*, document_id: str, conversation_id: Optional[str], question: str) -> dict[str, Any]:
     if conversation_id:
+        if conversation_id.startswith("local-"):
+            return {
+                "id": conversation_id,
+                "document_id": document_id,
+                "title": question[:80] or "Document chat",
+            }
         conversation = repo.get_document_conversation(conversation_id)
         if not conversation or conversation.get("document_id") != document_id:
             raise HTTPException(404, "conversation not found")

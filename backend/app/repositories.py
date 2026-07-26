@@ -6,10 +6,17 @@ table access here means the schema lives in exactly one place on the backend.
 """
 from __future__ import annotations
 
+import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
+
+from postgrest.exceptions import APIError
 
 from app.db import supabase
 from app.core.settings import settings
+
+logger = logging.getLogger(__name__)
 
 
 # ── documents ───────────────────────────────────────────────────────────────
@@ -175,32 +182,59 @@ def get_document_bundle(document_id: str) -> Optional[Dict[str, Any]]:
 
 def create_document_conversation(*, document_id: str, title: str) -> Dict[str, Any]:
     row = {"document_id": document_id, "title": title}
-    res = supabase().table("document_conversations").insert(row).execute()
-    return res.data[0]
+    try:
+        res = supabase().table("document_conversations").insert(row).execute()
+        return res.data[0]
+    except APIError as exc:
+        if _is_missing_table_error(exc, "document_conversations"):
+            logger.warning("supabase.chat_schema_missing table=document_conversations using_ephemeral_conversation")
+            now = datetime.now(timezone.utc).isoformat()
+            return {
+                "id": f"local-{uuid4()}",
+                "document_id": document_id,
+                "title": title,
+                "created_at": now,
+                "updated_at": now,
+            }
+        raise
 
 
 def get_document_conversation(conversation_id: str) -> Optional[Dict[str, Any]]:
-    res = (
-        supabase()
-        .table("document_conversations")
-        .select("*")
-        .eq("id", conversation_id)
-        .limit(1)
-        .execute()
-    )
-    return res.data[0] if res.data else None
+    if conversation_id.startswith("local-"):
+        return None
+    try:
+        res = (
+            supabase()
+            .table("document_conversations")
+            .select("*")
+            .eq("id", conversation_id)
+            .limit(1)
+            .execute()
+        )
+        return res.data[0] if res.data else None
+    except APIError as exc:
+        if _is_missing_table_error(exc, "document_conversations"):
+            logger.warning("supabase.chat_schema_missing table=document_conversations conversation_id=%s", conversation_id)
+            return None
+        raise
 
 
 def list_document_conversations(document_id: str) -> List[Dict[str, Any]]:
-    res = (
-        supabase()
-        .table("document_conversations")
-        .select("*")
-        .eq("document_id", document_id)
-        .order("updated_at", desc=True)
-        .execute()
-    )
-    return res.data or []
+    try:
+        res = (
+            supabase()
+            .table("document_conversations")
+            .select("*")
+            .eq("document_id", document_id)
+            .order("updated_at", desc=True)
+            .execute()
+        )
+        return res.data or []
+    except APIError as exc:
+        if _is_missing_table_error(exc, "document_conversations"):
+            logger.warning("supabase.chat_schema_missing table=document_conversations document_id=%s", document_id)
+            return []
+        raise
 
 
 def insert_document_chat_message(
@@ -218,18 +252,60 @@ def insert_document_chat_message(
         "content": content,
         "model": model,
     }
-    res = supabase().table("document_chat_messages").insert(row).execute()
-    return res.data[0]
+    if conversation_id.startswith("local-"):
+        now = datetime.now(timezone.utc).isoformat()
+        return {
+            "id": f"local-message-{uuid4()}",
+            "conversation_id": conversation_id,
+            "document_id": document_id,
+            "role": role,
+            "content": content,
+            "model": model,
+            "created_at": now,
+        }
+    try:
+        res = supabase().table("document_chat_messages").insert(row).execute()
+        return res.data[0]
+    except APIError as exc:
+        if _is_missing_table_error(exc, "document_chat_messages"):
+            logger.warning("supabase.chat_schema_missing table=document_chat_messages using_ephemeral_message")
+            now = datetime.now(timezone.utc).isoformat()
+            return {
+                "id": f"local-message-{uuid4()}",
+                "conversation_id": conversation_id,
+                "document_id": document_id,
+                "role": role,
+                "content": content,
+                "model": model,
+                "created_at": now,
+            }
+        raise
 
 
 def list_document_chat_messages(conversation_id: str, limit: int = 50) -> List[Dict[str, Any]]:
-    res = (
-        supabase()
-        .table("document_chat_messages")
-        .select("*")
-        .eq("conversation_id", conversation_id)
-        .order("created_at", desc=False)
-        .limit(limit)
-        .execute()
-    )
-    return res.data or []
+    if conversation_id.startswith("local-"):
+        return []
+    try:
+        res = (
+            supabase()
+            .table("document_chat_messages")
+            .select("*")
+            .eq("conversation_id", conversation_id)
+            .order("created_at", desc=False)
+            .limit(limit)
+            .execute()
+        )
+        return res.data or []
+    except APIError as exc:
+        if _is_missing_table_error(exc, "document_chat_messages"):
+            logger.warning("supabase.chat_schema_missing table=document_chat_messages conversation_id=%s", conversation_id)
+            return []
+        raise
+
+
+def _is_missing_table_error(exc: APIError, table_name: str) -> bool:
+    payload = getattr(exc, "args", [{}])[0]
+    if not isinstance(payload, dict):
+        return False
+    message = str(payload.get("message") or "")
+    return payload.get("code") == "PGRST205" and table_name in message
