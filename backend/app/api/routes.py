@@ -1,20 +1,28 @@
-"""Golden-path routes: create a case, upload+digitise a filing, extract typed
-fields, and ask a cited question grounded in the digitised text.
+"""API routes.
 
-State lives in an in-memory store (app.services.store) for now — swap for
-Supabase in M1. Shapes line up with the frontend's lib/api.ts.
+This team's MVP centrepiece is `POST /api/documents/process` — one call that
+digitises a filing, translates it to English, and summarises the IPC sections
+found. Results are persisted to Supabase (best-effort) so the workbench team
+can read them; `GET /api/documents/{id}` returns the stored bundle.
+
+The `/api/cases/...` + `/ask` endpoints (in-memory store) are the workbench
+teammate's surface — left intact.
 """
 from __future__ import annotations
 
+import logging
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
+from app import repositories as repo
 from app.services import extraction, sarvam, store
 from app.services.citations import extract_ipc_references
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
 
 
@@ -35,12 +43,12 @@ class ProcessDocumentOut(BaseModel):
     raw_extraction: str
     eng_extraction: str
     ipc_sections: list[IpcSectionOut]
+    # Supabase id when persistence succeeded (best-effort); null otherwise.
+    document_id: Optional[str] = None
+    filing_type: Optional[str] = None
 
 
-@router.post("/cases")
-def create_case(body: CreateCaseIn):
-    return store.create_case(body.title)
-
+# ── MVP: single-call digitise → translate → IPC summary (+ persist) ─────────
 
 @router.post("/documents/process", response_model=ProcessDocumentOut)
 def process_document(
@@ -48,10 +56,31 @@ def process_document(
     language: str = Form("en-IN"),
     output_format: str = Form("md"),
 ):
-    """Single-call API: digitise, translate to English, and summarize IPC refs."""
+    """Digitise, translate to English, summarise IPC refs, and persist."""
     if output_format != "md":
         raise HTTPException(400, "single process API currently supports output_format=md only")
-    return _process_upload(file=file, language=language, output_format=output_format)
+    processed = _process_upload(file=file, language=language, output_format=output_format)
+    processed.filing_type = extraction.detect_filing_type(processed.raw_extraction)
+    processed.document_id = _persist_process(
+        file_name=file.filename or "upload.pdf", language=language, processed=processed
+    )
+    return processed
+
+
+@router.get("/documents/{document_id}")
+def get_document(document_id: str):
+    """Return the persisted document with its digitizations/extractions/translations."""
+    bundle = repo.get_document_bundle(document_id)
+    if not bundle:
+        raise HTTPException(404, "document not found")
+    return bundle
+
+
+# ── Workbench teammate's surface (in-memory store) — left intact ────────────
+
+@router.post("/cases")
+def create_case(body: CreateCaseIn):
+    return store.create_case(body.title)
 
 
 @router.post("/cases/{case_id}/documents")
@@ -81,7 +110,6 @@ def upload_document(
             "status": "ready",
         },
     )
-    # Don't ship the full text back in the create response; return a preview.
     return {
         "id": doc["id"],
         "caseId": case_id,
@@ -131,6 +159,8 @@ def ask(case_id: str, body: AskIn):
     }
 
 
+# ── helpers ─────────────────────────────────────────────────────────────────
+
 def _find_doc(case_id: str, document_id: str):
     if store.get_case(case_id) is None:
         raise HTTPException(404, "case not found")
@@ -175,3 +205,37 @@ def _section_sort_key(section: str) -> tuple[int, str]:
     numeric = "".join(ch for ch in section if ch.isdigit())
     suffix = "".join(ch for ch in section if not ch.isdigit())
     return (int(numeric or 0), suffix)
+
+
+def _persist_process(*, file_name: str, language: str, processed: ProcessDocumentOut) -> Optional[str]:
+    """Best-effort: persist the processed result to Supabase. Never fail the
+    request on a DB error — the MVP demo must still return its result."""
+    try:
+        doc = repo.insert_document(
+            file_name=file_name,
+            filing_type=processed.filing_type or "unknown",
+            source_language=language,
+            status="ready",
+        )
+        repo.insert_digitization(
+            document_id=doc["id"], output_format="md", content=processed.raw_extraction
+        )
+        if processed.eng_extraction:
+            repo.insert_translation(
+                document_id=doc["id"],
+                target_language="en-IN",
+                source_language=language,
+                translated_text=processed.eng_extraction,
+                model=sarvam.TRANSLATE_MODEL,
+            )
+        if processed.ipc_sections:
+            repo.insert_extraction(
+                document_id=doc["id"],
+                filing_type=processed.filing_type,
+                fields={"ipc_sections": [s.model_dump() for s in processed.ipc_sections]},
+                model=sarvam.IPC_SUMMARY_MODEL,
+            )
+        return doc["id"]
+    except Exception as exc:  # noqa: BLE001 - persistence is best-effort for the MVP
+        logger.warning("Supabase persistence failed (continuing without it): %s", exc)
+        return None

@@ -12,8 +12,10 @@ class Settings(BaseSettings):
     # Sarvam (Document Intelligence, chat, translate)
     sarvam_api_key: str = ""
 
-    # Supabase (service role — server only)
+    # Supabase. `supabase_key` is the key the client uses; prefer the
+    # service-role key in prod (set supabase_service_role_key and it wins).
     supabase_url: str = ""
+    supabase_key: str = ""
     supabase_service_role_key: str = ""
 
     # CORS origin for the Next.js frontend

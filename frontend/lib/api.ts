@@ -1,12 +1,11 @@
 /**
- * Thin client for the Samajh Python backend (FastAPI).
+ * Client for the Samajh Python backend (FastAPI).
  *
- * The backend owns Sarvam (Document Intelligence, chat, translate) and the
- * database writes; the frontend never holds the Sarvam key. Point at the
- * backend with NEXT_PUBLIC_BACKEND_URL (default http://localhost:8000).
+ * The MVP endpoint is `processDocument` → one call that digitises a filing,
+ * translates it to English, and summarises the IPC sections. The backend owns
+ * Sarvam + Supabase; the browser never holds the Sarvam key. Point at it with
+ * NEXT_PUBLIC_BACKEND_URL (default http://localhost:8000).
  */
-import type { Answer, CaseRecord, DocumentRecord } from '@/types';
-
 const BASE = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000';
 
 export class ApiError extends Error {
@@ -29,7 +28,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const text = await res.text();
   const body = text ? safeJson(text) : undefined;
   if (!res.ok) {
-    throw new ApiError(`${init?.method ?? 'GET'} ${path} → ${res.status}`, res.status, body);
+    const detail =
+      body && typeof body === 'object' && 'detail' in body
+        ? String((body as { detail: unknown }).detail)
+        : '';
+    throw new ApiError(
+      `${init?.method ?? 'GET'} ${path} → ${res.status}${detail ? `: ${detail}` : ''}`,
+      res.status,
+      body,
+    );
   }
   return body as T;
 }
@@ -42,33 +49,30 @@ function safeJson(text: string): unknown {
   }
 }
 
+export interface IpcSection {
+  ipc: string;
+  summary: string;
+}
+
+export interface ProcessResult {
+  raw_extraction: string;
+  eng_extraction: string;
+  ipc_sections: IpcSection[];
+  document_id: string | null;
+  filing_type: string | null;
+}
+
 export const api = {
   health: () => request<{ status: string }>(`/health`),
 
-  createCase: (title: string) =>
-    request<CaseRecord>(`/api/cases`, { method: 'POST', body: JSON.stringify({ title }) }),
-
-  /** Upload a filing to a case; the backend runs the Sarvam DI job. */
-  uploadDocument: (caseId: string, file: File) => {
+  /** MVP: upload a filing → digitise + translate to English + IPC summaries. */
+  processDocument: (file: File, opts?: { language?: string }) => {
     const form = new FormData();
     form.append('file', file);
-    return request<DocumentRecord>(`/api/cases/${caseId}/documents`, {
-      method: 'POST',
-      body: form,
-    });
+    if (opts?.language) form.append('language', opts.language);
+    return request<ProcessResult>(`/api/documents/process`, { method: 'POST', body: form });
   },
 
-  /** Document-typed field extraction (fields + per-field confidence). */
-  extractDocument: (caseId: string, documentId: string) =>
-    request<{ documentId: string; filingType: string; fields: Record<string, unknown> }>(
-      `/api/cases/${caseId}/documents/${documentId}/extract`,
-      { method: 'POST' },
-    ),
-
-  /** Ask a question over a case's digitised documents; returns a cited answer. */
-  ask: (caseId: string, question: string) =>
-    request<Answer>(`/api/cases/${caseId}/ask`, {
-      method: 'POST',
-      body: JSON.stringify({ question }),
-    }),
+  /** The persisted document + its digitizations / extractions / translations. */
+  getDocument: (documentId: string) => request<unknown>(`/api/documents/${documentId}`),
 };
