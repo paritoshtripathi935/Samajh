@@ -3,10 +3,10 @@
  *
  * The MVP flow is `processDocument` → raw extraction + coordinates, then
  * `streamEnglish` → English Markdown via chat completions. The backend owns
- * Sarvam + Supabase; the browser never holds the Sarvam key. Point at it with
- * NEXT_PUBLIC_BACKEND_URL (default http://localhost:8000).
+ * Sarvam + Supabase; the browser never holds the Sarvam key. By default the
+ * browser calls the Next.js `/api` proxy, which forwards to FastAPI.
  */
-const BASE = process.env.NEXT_PUBLIC_BACKEND_URL?.trim() || 'http://localhost:8000';
+const BASE = '';
 
 export class ApiError extends Error {
   constructor(message: string, readonly status: number, readonly body?: unknown) {
@@ -16,7 +16,8 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const url = `${BASE}${path}`;
+  const res = await fetch(url, {
     ...init,
     headers: {
       ...(init?.body && !(init.body instanceof FormData)
@@ -33,7 +34,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         ? String((body as { detail: unknown }).detail)
         : '';
     throw new ApiError(
-      `${init?.method ?? 'GET'} ${path} → ${res.status}${detail ? `: ${detail}` : ''}`,
+      `${init?.method ?? 'GET'} ${url} → ${res.status}${detail ? `: ${detail}` : ''}`,
       res.status,
       body,
     );
@@ -162,7 +163,8 @@ export const api = {
     onEvent: (event: EnglishStreamEvent) => void,
     opts?: { signal?: AbortSignal },
   ) => {
-    const res = await fetch(`${BASE}/api/documents/english/stream`, {
+    const url = `${BASE}/api/documents/english/stream`;
+    const res = await fetch(url, {
       method: 'POST',
       body: JSON.stringify(body),
       signal: opts?.signal,
@@ -177,7 +179,7 @@ export const api = {
           ? String((parsed as { detail: unknown }).detail)
           : '';
       throw new ApiError(
-        `POST /api/documents/english/stream → ${res.status}${detail ? `: ${detail}` : ''}`,
+        `POST ${url} → ${res.status}${detail ? `: ${detail}` : ''}`,
         res.status,
         parsed,
       );
