@@ -13,8 +13,8 @@ import {
   Gavel,
   Languages,
   Loader2,
-  RefreshCcw,
   Scale,
+  Send,
 } from 'lucide-react';
 import ThemeToggle from '@/components/ThemeToggle';
 import Markdown from '@/components/Markdown';
@@ -137,6 +137,10 @@ export default function DocumentPage() {
               setEnglishProgress({ current: 0, total: event.chunks });
               return;
             }
+            if (event.type === 'chunk_start') {
+              setEnglishProgress({ current: event.index, total: event.total });
+              return;
+            }
             if (event.type === 'delta') {
               streamedEnglish += event.text;
               setEnglishProgress({ current: event.index, total: event.total });
@@ -257,7 +261,7 @@ function downloadMarkdown() {
         )}
         <ToolbarButton onClick={copyEnglish} disabled={!view?.english} icon={<Clipboard size={15} />} label="Copy English" />
         <ToolbarButton onClick={downloadMarkdown} disabled={!view} icon={<Download size={15} />} label="Download Markdown" />
-        <ToolbarButton onClick={() => router.push('/')} icon={<RefreshCcw size={15} />} label="Reprocess" primary />
+        <ToolbarButton onClick={() => router.push('/')} icon={<Send size={15} />} label="Submit" primary />
         <ThemeToggle />
       </header>
 

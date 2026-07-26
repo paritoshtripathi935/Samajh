@@ -1,4 +1,4 @@
-from app.services.sarvam import CHAT_TRANSLATION_CHUNK_SIZE, _english_source_chunks
+from app.services.sarvam import CHAT_TRANSLATION_CHUNK_SIZE, english_source_chunks
 
 
 def test_english_generation_chunks_use_page_boundaries():
@@ -7,7 +7,7 @@ def test_english_generation_chunks_use_page_boundaries():
         {"page_num": 2, "blocks": [{"reading_order": 1, "text": "दूसरा पेज", "layout_tag": "paragraph"}]},
     ]
 
-    chunks = _english_source_chunks(raw_text="", pages=pages)
+    chunks = english_source_chunks(raw_text="", pages=pages)
 
     assert len(chunks) == 1
     assert "[Page 1]" in chunks[0]

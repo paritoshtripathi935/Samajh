@@ -91,6 +91,7 @@ export interface EnglishResult {
 
 export type EnglishStreamEvent =
   | { type: 'start'; chunks: number; document_id: string | null; model?: string }
+  | { type: 'chunk_start'; index: number; total: number }
   | { type: 'delta'; index: number; total: number; text: string }
   | { type: 'done'; document_id: string | null; eng_extraction: string }
   | { type: 'error'; message: string };

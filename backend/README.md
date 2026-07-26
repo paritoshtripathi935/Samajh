@@ -23,7 +23,7 @@ Frontend: `cd frontend && npm run dev` → http://localhost:3000 (upload a PDF).
 | `GET`  | `/health` | liveness |
 | `POST` | `/api/documents/process` | upload PDF → digitise → coordinate pages → IPC summaries → persist. Returns `{raw_extraction, pages, ipc_sections[], document_id, filing_type}` |
 | `POST` | `/api/documents/english` | generate English Markdown from `{raw_extraction, pages, document_id}` using Sarvam chat completions |
-| `POST` | `/api/documents/english/stream` | same English generation as NDJSON events: `start`, repeated `delta`, then `done` with stitched `eng_extraction` |
+| `POST` | `/api/documents/english/stream` | same English generation as NDJSON events: `start`, `chunk_start`, repeated `delta`, then `done` with stitched `eng_extraction` |
 | `GET`  | `/api/documents/{id}` | persisted document + digitizations/extractions/translations |
 | `POST` | `/api/cases…`, `/ask` | workbench teammate's surface (in-memory store) — left intact |
 

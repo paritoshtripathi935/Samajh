@@ -165,28 +165,35 @@ def stream_english(body: EnglishExtractionIn):
         len(body.pages or []),
     )
     source_text, pages = _resolve_english_source(body)
+    chunks = sarvam.english_source_chunks(raw_text=source_text, pages=pages)
 
     def events():
         translated: list[str] = []
         try:
-            first = True
+            yield _json_line(
+                {
+                    "type": "start",
+                    "document_id": body.document_id,
+                    "chunks": len(chunks),
+                    "model": sarvam.CHAT_TRANSLATION_MODEL,
+                }
+            )
             current_chunk_index = 0
-            for event in sarvam.iter_english_stream_with_chat(
-                raw_text=source_text,
-                pages=pages,
+            for event in sarvam.iter_english_stream_chunks_with_chat(
+                chunks=chunks,
                 source_language=body.source_language,
             ):
-                if first:
+                event_type = str(event.get("type") or "delta")
+                index = int(event["index"])
+                if event_type == "chunk_start":
                     yield _json_line(
                         {
-                            "type": "start",
-                            "document_id": body.document_id,
-                            "chunks": event["total"],
-                            "model": sarvam.CHAT_TRANSLATION_MODEL,
+                            "type": "chunk_start",
+                            "index": index,
+                            "total": event["total"],
                         }
                     )
-                    first = False
-                index = int(event["index"])
+                    continue
                 if index != current_chunk_index:
                     if translated and not translated[-1].endswith("\n\n"):
                         separator = "\n\n"
@@ -212,15 +219,6 @@ def stream_english(body: EnglishExtractionIn):
                 )
 
             english = "".join(translated).strip()
-            if not translated:
-                yield _json_line(
-                    {
-                        "type": "start",
-                        "document_id": body.document_id,
-                        "chunks": 0,
-                        "model": sarvam.CHAT_TRANSLATION_MODEL,
-                    }
-                )
 
             if body.document_id and english:
                 try:
@@ -252,7 +250,14 @@ def stream_english(body: EnglishExtractionIn):
             logger.exception("document.english_stream.sarvam_error document_id=%s", body.document_id)
             yield _json_line({"type": "error", "message": f"Sarvam chat completion failed: {exc}"})
 
-    return StreamingResponse(events(), media_type="application/x-ndjson")
+    return StreamingResponse(
+        events(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/documents/{document_id}")

@@ -446,7 +446,7 @@ def iter_english_with_chat(
     source_language: str = "auto",
 ) -> Iterator[Dict[str, Any]]:
     """Yield completed English Markdown chunks in document order."""
-    chunks = _english_source_chunks(raw_text=raw_text, pages=pages)
+    chunks = english_source_chunks(raw_text=raw_text, pages=pages)
     if not chunks:
         return
 
@@ -483,7 +483,7 @@ def iter_english_stream_with_chat(
     We still chunk by page/layout first so large documents, tables, and page
     ordering follow the same boundaries as the non-streaming endpoint.
     """
-    chunks = _english_source_chunks(raw_text=raw_text, pages=pages)
+    chunks = english_source_chunks(raw_text=raw_text, pages=pages)
     if not chunks:
         return
 
@@ -493,14 +493,33 @@ def iter_english_stream_with_chat(
         len(raw_text),
         len(pages or []),
     )
+    yield from iter_english_stream_chunks_with_chat(chunks=chunks, source_language=source_language)
+
+
+def iter_english_stream_chunks_with_chat(
+    *,
+    chunks: list[str],
+    source_language: str = "auto",
+) -> Iterator[Dict[str, Any]]:
+    """Yield token deltas from already-packed English source chunks."""
     for index, chunk in enumerate(chunks, start=1):
         logger.info("sarvam.english_chat.stream.chunk.start index=%s chars=%s", index, len(chunk))
+        yield {
+            "type": "chunk_start",
+            "index": index,
+            "total": len(chunks),
+        }
         text_parts: list[str] = []
         emitted = False
+        delta_count = 0
         for delta in _english_chat_completion_stream(chunk, index=index, total=len(chunks), source_language=source_language):
             emitted = True
+            delta_count += 1
+            if delta_count == 1:
+                logger.info("sarvam.english_chat.stream.first_delta index=%s chars=%s", index, len(delta))
             text_parts.append(delta)
             yield {
+                "type": "delta",
                 "index": index,
                 "total": len(chunks),
                 "delta": delta,
@@ -520,15 +539,21 @@ def iter_english_stream_with_chat(
                 source_language=source_language,
             )
             yield {
+                "type": "delta",
                 "index": index,
                 "total": len(chunks),
                 "delta": text,
             }
 
-        logger.info("sarvam.english_chat.stream.chunk.done index=%s output_chars=%s", index, len(text))
+        logger.info(
+            "sarvam.english_chat.stream.chunk.done index=%s output_chars=%s deltas=%s",
+            index,
+            len(text),
+            delta_count,
+        )
 
 
-def _english_source_chunks(
+def english_source_chunks(
     *,
     raw_text: str,
     pages: Optional[List[Dict[str, Any]]] = None,
