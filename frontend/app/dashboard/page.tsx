@@ -75,18 +75,18 @@ export default function DashboardPage() {
     setError(null);
     try {
       const originalPdfUrl = URL.createObjectURL(file);
-      const result = await api.processDocument(file, { language });
+      const result = await api.startDocumentProcessing(file, { language });
       try {
         sessionStorage.setItem('samajh:lastPdfUrl', originalPdfUrl);
       } catch {
         /* browser storage unavailable */
       }
       try {
-        sessionStorage.setItem('samajh:lastResult', JSON.stringify({ ...result, fileName: file.name, sourceLanguage: language }));
+        sessionStorage.removeItem('samajh:lastResult');
       } catch {
         /* quota - the review page can fetch persisted rows by id */
       }
-      router.push(`/document/${result.document_id ?? 'local'}`);
+      router.push(`/document/${result.document_id}`);
     } catch (err) {
       setError(err instanceof ApiError || err instanceof Error ? err.message : String(err));
       setProcessing(false);

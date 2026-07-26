@@ -1,5 +1,7 @@
 from app.api import routes
 from fastapi.responses import Response
+from fastapi import UploadFile
+from io import BytesIO
 
 
 def _processed():
@@ -168,3 +170,37 @@ def test_chat_with_document_persists_user_and_assistant(monkeypatch):
     assert response.answer == "Grounded answer"
     assert calls["messages"][0]["role"] == "user"
     assert calls["messages"][1]["role"] == "assistant"
+
+
+def test_processing_start_returns_id_before_background_ocr(monkeypatch):
+    calls = {}
+
+    class Tasks:
+        def add_task(self, function, *args):
+            calls["task"] = (function, args)
+
+    monkeypatch.setattr(
+        routes.repo,
+        "insert_document",
+        lambda **kwargs: calls.update(insert=kwargs) or {"id": "doc-fast"},
+    )
+    monkeypatch.setattr(
+        routes.repo,
+        "upload_document_file",
+        lambda **kwargs: calls.update(upload=kwargs) or "doc-fast/filing.pdf",
+    )
+    monkeypatch.setattr(
+        routes.repo,
+        "update_document",
+        lambda document_id, **fields: calls.update(update=(document_id, fields)) or {},
+    )
+
+    result = routes.start_document_processing(
+        Tasks(),
+        UploadFile(filename="filing.pdf", file=BytesIO(b"%PDF-test")),
+        "hi-IN",
+    )
+
+    assert result.document_id == "doc-fast"
+    assert calls["insert"]["status"] == "uploaded"
+    assert calls["task"][0] is routes._process_document_background

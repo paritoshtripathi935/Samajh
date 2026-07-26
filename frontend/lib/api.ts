@@ -85,6 +85,11 @@ export interface ProcessResult {
   filing_type: string | null;
 }
 
+export interface ProcessStarted {
+  document_id: string;
+  status: 'processing';
+}
+
 export interface EnglishResult {
   eng_extraction: string;
   document_id: string | null;
@@ -120,6 +125,7 @@ type EnglishRequest = {
   pages?: LayoutPage[] | null;
   document_id?: string | null;
   source_language?: string;
+  completed_chunks?: (string | null)[];
 };
 
 export interface DocumentBundle {
@@ -196,6 +202,14 @@ export const api = {
     form.append('file', file);
     if (opts?.language) form.append('language', opts.language);
     return request<ProcessResult>(`/api/documents/process`, { method: 'POST', body: form });
+  },
+
+  /** Save upload immediately; OCR continues after navigation. */
+  startDocumentProcessing: (file: File, opts?: { language?: string }) => {
+    const form = new FormData();
+    form.append('file', file);
+    if (opts?.language) form.append('language', opts.language);
+    return request<ProcessStarted>(`/api/documents/process/start`, { method: 'POST', body: form });
   },
 
   /** MVP step 2: generate English Markdown via Sarvam chat completions. */

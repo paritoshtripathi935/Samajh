@@ -44,6 +44,7 @@ interface View {
   pages: LayoutPage[];
   documentId: string | null;
   sourceLanguage: string;
+  status: string;
 }
 
 function fromBundle(b: DocumentBundle, pdfUrl: string | null): View {
@@ -57,6 +58,7 @@ function fromBundle(b: DocumentBundle, pdfUrl: string | null): View {
     pages: normalizePages(b.digitizations[0]?.content_json),
     documentId: b.document.id,
     sourceLanguage: b.document.source_language ?? 'auto',
+    status: b.document.status,
   };
 }
 
@@ -71,6 +73,7 @@ function fromResult(r: ProcessResult & { fileName?: string; sourceLanguage?: str
     pages: normalizePages(r.pages),
     documentId: r.document_id,
     sourceLanguage: r.sourceLanguage ?? 'auto',
+    status: 'ready',
   };
 }
 
@@ -94,6 +97,7 @@ export default function DocumentPage() {
 
   useEffect(() => {
     let alive = true;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
     async function load() {
       const pdfUrl = sessionStorage.getItem('samajh:lastPdfUrl');
 
@@ -101,7 +105,14 @@ export default function DocumentPage() {
         try {
           const bundle = await api.getDocument(id);
           const persistedPdfUrl = bundle.document.file_ref ? api.documentPdfUrl(id) : null;
-          if (alive) setView(fromBundle(bundle, persistedPdfUrl ?? pdfUrl));
+          if (alive) {
+            setView(fromBundle(bundle, persistedPdfUrl ?? pdfUrl));
+            if (bundle.document.status !== 'ready' && bundle.document.status !== 'failed') {
+              pollTimer = setTimeout(load, 2000);
+            } else if (bundle.document.status === 'failed') {
+              setError('Document processing failed. Please upload it again.');
+            }
+          }
           return;
         } catch {
           /* fall through to the just-processed result below */
@@ -123,6 +134,7 @@ export default function DocumentPage() {
     load();
     return () => {
       alive = false;
+      if (pollTimer) clearTimeout(pollTimer);
     };
   }, [id]);
 
@@ -131,7 +143,12 @@ export default function DocumentPage() {
     const controller = new AbortController();
 
     async function runEnglish() {
-      if (!view || view.english) return;
+      if (!view || view.status !== 'ready' || !view.original || view.english) {
+        if (view?.documentId && view.english) {
+          sessionStorage.removeItem(`samajh:translation:v4:${view.documentId}`);
+        }
+        return;
+      }
       const runKey = `${view.documentId ?? view.fileName}:${view.original.length}:${view.pages.length}`;
       if (englishStartedForRef.current === runKey) return;
       englishStartedForRef.current = runKey;
@@ -141,13 +158,26 @@ export default function DocumentPage() {
       setEnglishProgress(null);
       try {
         let finalEnglish = '';
-        let streamedEnglish = '';
+        const checkpointKey = `samajh:translation:v4:${view.documentId ?? view.fileName}`;
+        let translatedChunks: (string | null)[] = [];
+        try {
+          const saved = sessionStorage.getItem(checkpointKey);
+          if (saved) translatedChunks = JSON.parse(saved);
+        } catch {
+          translatedChunks = [];
+        }
+        const showTranslation = () => {
+          const text = translatedChunks.filter((chunk): chunk is string => Boolean(chunk)).join('\n\n');
+          setView((current) => (current ? { ...current, english: text } : current));
+        };
+        if (translatedChunks.length) showTranslation();
         await api.streamEnglish(
           {
             raw_extraction: view.original,
             pages: view.pages,
             document_id: view.documentId,
             source_language: view.sourceLanguage,
+            completed_chunks: translatedChunks,
           },
           (event) => {
             if (!alive) return;
@@ -160,13 +190,15 @@ export default function DocumentPage() {
               return;
             }
             if (event.type === 'delta') {
-              streamedEnglish += event.text;
+              translatedChunks[event.index - 1] = event.text;
+              sessionStorage.setItem(checkpointKey, JSON.stringify(translatedChunks));
               setEnglishProgress({ current: event.index, total: event.total });
-              setView((current) => (current ? { ...current, english: streamedEnglish } : current));
+              showTranslation();
               return;
             }
             if (event.type === 'done') {
               finalEnglish = event.eng_extraction;
+              sessionStorage.removeItem(checkpointKey);
               setView((current) => (current ? { ...current, english: event.eng_extraction } : current));
             }
           },
@@ -315,7 +347,11 @@ function downloadMarkdown() {
               fontWeight: t.weight.semibold,
             }}
           >
-            <CheckCircle2 size={15} /> Completed
+            {view.status !== 'ready' && view.status !== 'failed' ? (
+              <><Loader2 size={15} className="animate-spin" /> Processing</>
+            ) : (
+              <><CheckCircle2 size={15} /> Completed</>
+            )}
           </span>
         )}
         <ToolbarButton onClick={copyEnglish} disabled={!view?.english} icon={<Clipboard size={15} />} label="Copy English" />
@@ -397,6 +433,11 @@ function downloadMarkdown() {
                     )}
                     <Markdown>{activeText}</Markdown>
                   </>
+                ) : view.status !== 'ready' && view.status !== 'failed' ? (
+                  <Empty
+                    title="Digitising document"
+                    text="The PDF is available now. Raw extraction and analysis will appear automatically when Sarvam finishes."
+                  />
                 ) : tab === 'english' && englishLoading ? (
                   <Empty
                     title="Generating English translation"

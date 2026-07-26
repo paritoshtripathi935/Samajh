@@ -32,7 +32,11 @@ class Settings(BaseSettings):
 
     # Sarvam Document Intelligence allows limited request throughput. Keep
     # parallel batch jobs conservative; increase only after observing rate limits.
-    sarvam_di_max_workers: int = 3
+    sarvam_di_max_workers: int = 4
+    sarvam_ipc_max_workers: int = 4
+    # Text translation is network-bound. Sarvam recommends async/concurrent
+    # calls for chunk fan-out; keep this below the account's request-rate cap.
+    sarvam_translation_max_workers: int = 4
 
 
 settings = Settings()

@@ -16,6 +16,13 @@ cd backend
 
 Frontend: `cd frontend && npm run dev` → http://localhost:3000 (upload a PDF).
 
+For a local/production-style run with multiple API workers (do not combine
+`--reload` with this):
+
+```bash
+./.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
+```
+
 ## API
 
 | Method | Path | Does |
@@ -38,10 +45,10 @@ Frontend: `cd frontend && npm run dev` → http://localhost:3000 (upload a PDF).
 
 - **Digitise** — the only Sarvam document REST API (async job, `sarvamai` SDK). PDFs
   over the **10-page/job** limit are auto-split with `pypdf` and stitched (`app/services/sarvam.py`).
-- **English generation** — uses `sarvam-105b` chat completions, not the Translate API.
-  Page/block JSON is used for page-level chunking where available; long fallback text is
-  chunked by character budget. Streaming uses Sarvam chat `stream=True` within those
-  chunks, so tables and page order use the same chunk packing as the non-streaming endpoint.
+- **English generation** — uses `sarvam-translate:v1`, splits input below its
+  2,000-character limit, and translates up to `SARVAM_TRANSLATION_MAX_WORKERS`
+  chunks concurrently. The browser checkpoints completed chunks so refreshes
+  resume missing chunks rather than starting the whole document again.
 - **IPC** — `citations.extract_ipc_references()` finds section refs; each is summarised by
   `sarvam-105b`. (Sarvam's schema "Extract" has no REST API — it's dashboard-only — so
   `app/services/extraction.py` does typed extraction via the chat model.)

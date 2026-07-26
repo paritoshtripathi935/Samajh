@@ -15,15 +15,19 @@ import tempfile
 import time
 import json
 from datetime import datetime, timezone
+import io
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from app import repositories as repo
+from app.core.settings import settings
 from app.services import extraction, legal_search, sarvam, store
+from app.services.translation_sanitizer import sanitize_translated_markdown
 from app.services.citations import extract_ipc_references
 
 logger = logging.getLogger(__name__)
@@ -70,11 +74,17 @@ class DocumentListOut(BaseModel):
     documents: list[DocumentListItemOut]
 
 
+class ProcessDocumentStartedOut(BaseModel):
+    document_id: str
+    status: str = "processing"
+
+
 class EnglishExtractionIn(BaseModel):
     raw_extraction: Optional[str] = None
     pages: Optional[list[dict[str, Any]]] = None
     document_id: Optional[str] = None
     source_language: str = "auto"
+    completed_chunks: list[Optional[str]] = []
 
 
 class EnglishExtractionOut(BaseModel):
@@ -166,6 +176,42 @@ def list_documents(limit: int = 50):
     logger.info("document.list.done count=%s", len(documents))
     return DocumentListOut(documents=documents)
 
+
+@router.post("/documents/process/start", response_model=ProcessDocumentStartedOut)
+def start_document_processing(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    language: str = Form("en-IN"),
+):
+    """Persist the upload, return its ID, then process it after the response."""
+    original_pdf = file.file.read()
+    file_name = file.filename or "upload.pdf"
+    try:
+        document = repo.insert_document(
+            file_name=file_name,
+            filing_type="unknown",
+            source_language=language,
+            status="uploaded",
+        )
+        file_ref = repo.upload_document_file(
+            document_id=document["id"],
+            file_name=file_name,
+            content=original_pdf,
+        )
+        repo.update_document(document["id"], file_ref=file_ref)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("document.process_start.persist_error filename=%s", file_name)
+        raise HTTPException(502, f"Could not save document for processing: {exc}") from exc
+
+    background_tasks.add_task(
+        _process_document_background,
+        document["id"],
+        file_name,
+        language,
+        original_pdf,
+    )
+    return ProcessDocumentStartedOut(document_id=document["id"])
+
 @router.post("/documents/process", response_model=ProcessDocumentOut)
 def process_document(
     file: UploadFile = File(...),
@@ -183,8 +229,6 @@ def process_document(
     original_pdf = file.file.read()
     file.file.seek(0)
     processed, pages, job_id = _digitise_and_summarise(file=file, language=language)
-    logger.info("document.process.detect_filing_type.start raw_chars=%s", len(processed.raw_extraction))
-    processed.filing_type = extraction.detect_filing_type(processed.raw_extraction)
     processed.document_id = _persist_process(
         file_name=file.filename or "upload.pdf",
         language=language,
@@ -222,11 +266,11 @@ def generate_english(body: EnglishExtractionIn):
     source_text, pages = _resolve_english_source(body)
 
     try:
-        english = sarvam.generate_english_with_chat(
+        english = sanitize_translated_markdown(sarvam.generate_english_with_chat(
             raw_text=source_text,
             pages=pages,
             source_language=body.source_language,
-        )
+        ))
     except sarvam.SarvamError as exc:
         logger.exception("document.english.sarvam_error document_id=%s", body.document_id)
         raise HTTPException(502, f"Sarvam chat completion failed: {exc}")
@@ -257,8 +301,8 @@ def generate_english(body: EnglishExtractionIn):
 def stream_english(body: EnglishExtractionIn):
     """Stream English Markdown as newline-delimited JSON events.
 
-    Each `delta` event is emitted from Sarvam's `stream=True` chat completion.
-    The final `done` event includes the stitched Markdown.
+    Chunks are translated concurrently with Sarvam Translate. Completed chunks
+    supplied by the browser are reused after a refresh.
     """
     start = time.perf_counter()
     logger.info(
@@ -272,20 +316,22 @@ def stream_english(body: EnglishExtractionIn):
     chunks = sarvam.english_source_chunks(raw_text=source_text, pages=pages)
 
     def events():
-        translated: list[str] = []
+        translated: dict[int, str] = {}
         try:
             yield _json_line(
                 {
                     "type": "start",
                     "document_id": body.document_id,
                     "chunks": len(chunks),
-                    "model": sarvam.CHAT_TRANSLATION_MODEL,
+                    "model": sarvam.TRANSLATION_MODEL,
                 }
             )
-            current_chunk_index = 0
-            for event in sarvam.iter_english_stream_chunks_with_chat(
+            completed = list(body.completed_chunks[: len(chunks)])
+            translated.update({index: text for index, text in enumerate(completed, start=1) if text})
+            for event in sarvam.iter_english_chunks_with_translate(
                 chunks=chunks,
                 source_language=body.source_language,
+                completed_indices=set(translated),
             ):
                 event_type = str(event.get("type") or "delta")
                 index = int(event["index"])
@@ -298,21 +344,8 @@ def stream_english(body: EnglishExtractionIn):
                         }
                     )
                     continue
-                if index != current_chunk_index:
-                    if translated and not translated[-1].endswith("\n\n"):
-                        separator = "\n\n"
-                        translated.append(separator)
-                        yield _json_line(
-                            {
-                                "type": "delta",
-                                "index": index,
-                                "total": event["total"],
-                                "text": separator,
-                            }
-                        )
-                    current_chunk_index = index
                 delta = str(event["delta"])
-                translated.append(delta)
+                translated[index] = delta
                 yield _json_line(
                     {
                         "type": "delta",
@@ -322,7 +355,11 @@ def stream_english(body: EnglishExtractionIn):
                     }
                 )
 
-            english = "".join(translated).strip()
+            english = sanitize_translated_markdown("\n\n".join(
+                translated[index].strip()
+                for index in range(1, len(chunks) + 1)
+                if translated.get(index, "").strip()
+            ))
 
             if body.document_id and english:
                 try:
@@ -331,7 +368,7 @@ def stream_english(body: EnglishExtractionIn):
                         target_language="en-IN",
                         source_language=body.source_language,
                         translated_text=english,
-                        model=sarvam.CHAT_TRANSLATION_MODEL,
+                        model=sarvam.TRANSLATION_MODEL,
                     )
                     logger.info("document.english_stream.persist.done document_id=%s", body.document_id)
                 except Exception as exc:  # noqa: BLE001 - translation persistence is best-effort
@@ -659,13 +696,25 @@ def _digitise_and_summarise(file: UploadFile, language: str):
             len(pages),
             len(result.output_files),
         )
-        logger.info("document.ipc.start filename=%s", file.filename)
-        ipc_sections = _summarize_ipc_sections(clean_md)
-        logger.info("document.ipc.done filename=%s ipc_sections=%s", file.filename, [s.ipc for s in ipc_sections])
+        # These post-OCR analyses are independent. Running them together removes
+        # two serial LLM tails from the upload response.
+        logger.info("document.post_ocr.parallel.start filename=%s", file.filename)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            ipc_future = executor.submit(_summarize_ipc_sections, clean_md)
+            filing_future = executor.submit(extraction.detect_filing_type, clean_md)
+            ipc_sections = ipc_future.result()
+            filing_type = filing_future.result()
+        logger.info(
+            "document.post_ocr.parallel.done filename=%s ipc_sections=%s filing_type=%s",
+            file.filename,
+            [s.ipc for s in ipc_sections],
+            filing_type,
+        )
         processed = ProcessDocumentOut(
             raw_extraction=clean_md,
             ipc_sections=ipc_sections,
             pages=pages or None,
+            filing_type=filing_type,
         )
         return processed, pages, str(result.job_id)
     except sarvam.SarvamError as e:
@@ -680,13 +729,17 @@ def _summarize_ipc_sections(markdown: str) -> list[IpcSectionOut]:
     refs = extract_ipc_references(markdown)
     unique_sections = sorted({ref.section for ref in refs}, key=_section_sort_key)
     logger.info("document.ipc.detected refs=%s unique_sections=%s", len(refs), unique_sections)
-    summaries: list[IpcSectionOut] = []
-    for section in unique_sections:
+    def summarize(section: str) -> IpcSectionOut:
         logger.info("document.ipc.summary.start section=%s", section)
         summary = sarvam.summarize_ipc_section(section) or ""
         logger.info("document.ipc.summary.done section=%s summary_chars=%s", section, len(summary))
-        summaries.append(IpcSectionOut(ipc=section, summary=summary))
-    return summaries
+        return IpcSectionOut(ipc=section, summary=summary)
+
+    workers = max(1, min(settings.sarvam_ipc_max_workers, len(unique_sections)))
+    if not unique_sections:
+        return []
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        return list(executor.map(summarize, unique_sections))
 
 
 def _section_sort_key(section: str) -> tuple[int, str]:
@@ -798,3 +851,41 @@ def _persist_process(
     except Exception as exc:  # noqa: BLE001 - persistence is best-effort for the MVP
         logger.warning("Supabase persistence failed (continuing without it): %s", exc)
         return None
+
+
+def _process_document_background(
+    document_id: str,
+    file_name: str,
+    language: str,
+    original_pdf: bytes,
+) -> None:
+    """Complete OCR and analysis independently of the browser connection."""
+    upload = UploadFile(filename=file_name, file=io.BytesIO(original_pdf))
+    try:
+        processed, pages, job_id = _digitise_and_summarise(file=upload, language=language)
+        repo.insert_digitization(
+            document_id=document_id,
+            output_format="md",
+            content=processed.raw_extraction,
+            content_json=pages or None,
+            sarvam_job_id=job_id,
+        )
+        repo.insert_extraction(
+            document_id=document_id,
+            filing_type=processed.filing_type,
+            fields={"ipc_sections": [section.model_dump() for section in processed.ipc_sections]},
+            model=sarvam.IPC_SUMMARY_MODEL,
+        )
+        repo.update_document(
+            document_id,
+            filing_type=processed.filing_type or "unknown",
+            page_count=len(pages) if pages else None,
+            status="ready",
+        )
+        logger.info("document.background.done document_id=%s", document_id)
+    except Exception:  # noqa: BLE001 - status is the polling contract
+        logger.exception("document.background.failed document_id=%s", document_id)
+        try:
+            repo.update_document(document_id, status="failed")
+        except Exception:
+            logger.exception("document.background.status_update_failed document_id=%s", document_id)

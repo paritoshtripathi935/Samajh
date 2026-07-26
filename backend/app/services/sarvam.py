@@ -55,6 +55,8 @@ CHAT_MODEL = "sarvam-30b"          # sarvam-105b for the heavier model
 IPC_SUMMARY_MODEL = "sarvam-105b"
 RESEARCH_SEARCH_MODEL = "sarvam-105b"
 CHAT_TRANSLATION_MODEL = "sarvam-105b"
+TRANSLATION_MODEL = "sarvam-translate:v1"
+TRANSLATION_CHUNK_SIZE = 1900
 CHAT_TRANSLATION_CHUNK_SIZE = 3000
 CHAT_TRANSLATION_MAX_TOKENS = 4096
 MAX_DI_PAGES = 10
@@ -556,6 +558,121 @@ def iter_english_stream_chunks_with_chat(
         )
 
 
+def iter_english_chunks_with_translate(
+    *,
+    chunks: list[str],
+    source_language: str = "auto",
+    completed_indices: Optional[set[int]] = None,
+) -> Iterator[Dict[str, Any]]:
+    """Translate remaining chunks concurrently and yield them in document order."""
+    completed_indices = completed_indices or set()
+    remaining = [
+        (index, chunk)
+        for index, chunk in enumerate(chunks, start=1)
+        if index not in completed_indices
+    ]
+    if not remaining:
+        return
+    workers = max(1, min(settings.sarvam_translation_max_workers, len(remaining)))
+    logger.info(
+        "sarvam.translate.parallel.start chunks=%s resume_from=%s workers=%s",
+        len(chunks),
+        len(completed_indices),
+        workers,
+    )
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(
+                _translate_chunk,
+                chunk,
+                source_language=source_language,
+                index=index,
+                total=len(chunks),
+            ): index
+            for index, chunk in remaining
+        }
+        for future in as_completed(futures):
+            index = futures[future]
+            yield {"type": "chunk_start", "index": index, "total": len(chunks)}
+            yield {
+                "type": "delta",
+                "index": index,
+                "total": len(chunks),
+                "delta": future.result(),
+            }
+
+
+def _translate_chunk(chunk: str, *, source_language: str, index: int, total: int) -> str:
+    logger.info("sarvam.translate.chunk.start index=%s total=%s chars=%s", index, total, len(chunk))
+    detected_source = _indic_source_language(chunk)
+    if not detected_source:
+        logger.info("sarvam.translate.chunk.passthrough index=%s script=latin", index)
+        return chunk.strip()
+    # Digitization language is a recognition hint selected at upload time, not
+    # reliable language metadata for mixed-language judgments.
+    translation_source = detected_source or source_language
+    try:
+        response = _client().text.translate(
+            input=chunk,
+            source_language_code=translation_source,
+            target_language_code="en-IN",
+            mode="formal",
+            model=TRANSLATION_MODEL,
+        )
+        text = str(response.translated_text or "").strip()
+        if text:
+            residual_before = _indic_character_count(text)
+            if residual_before:
+                logger.warning(
+                    "sarvam.translate.chunk.residual_indic index=%s chars=%s",
+                    index,
+                    residual_before,
+                )
+                revised = _english_chat_completion(
+                    text,
+                    index=index,
+                    total=total,
+                    source_language=translation_source,
+                ).strip()
+                if revised and _indic_character_count(revised) < residual_before:
+                    text = revised
+            logger.info("sarvam.translate.chunk.done index=%s output_chars=%s", index, len(text))
+            return text
+    except Exception as exc:  # noqa: BLE001 - fall back to chat for one failed chunk
+        logger.warning("sarvam.translate.chunk.error index=%s error=%s", index, exc)
+    return _english_chat_completion_with_fallback(
+        chunk,
+        index=index,
+        total=total,
+        source_language=translation_source,
+    )
+
+
+def _indic_source_language(text: str) -> Optional[str]:
+    """Infer Sarvam's source code from Unicode script without another API call."""
+    script_ranges = (
+        ("\u0900", "\u097f", "hi-IN"),  # Devanagari; Hindi is the safest default
+        ("\u0980", "\u09ff", "bn-IN"),
+        ("\u0a00", "\u0a7f", "pa-IN"),
+        ("\u0a80", "\u0aff", "gu-IN"),
+        ("\u0b00", "\u0b7f", "od-IN"),
+        ("\u0b80", "\u0bff", "ta-IN"),
+        ("\u0c00", "\u0c7f", "te-IN"),
+        ("\u0c80", "\u0cff", "kn-IN"),
+        ("\u0d00", "\u0d7f", "ml-IN"),
+    )
+    counts = {
+        language: sum(start <= char <= end for char in text)
+        for start, end, language in script_ranges
+    }
+    language, count = max(counts.items(), key=lambda item: item[1])
+    return language if count else None
+
+
+def _indic_character_count(text: str) -> int:
+    return sum("\u0900" <= char <= "\u0d7f" for char in text)
+
+
 def english_source_chunks(
     *,
     raw_text: str,
@@ -568,10 +685,10 @@ def english_source_chunks(
             if page_text.strip():
                 page_no = page.get("page_num") or page.get("page_number") or page.get("page") or len(page_chunks) + 1
                 page_chunks.append(f"[Page {page_no}]\n{page_text}")
-        return _pack_chunks(page_chunks, max_chars=CHAT_TRANSLATION_CHUNK_SIZE)
+        return _pack_chunks(page_chunks, max_chars=TRANSLATION_CHUNK_SIZE)
 
     text = strip_data_uris(raw_text)
-    return _chunk_text(text, max_chars=CHAT_TRANSLATION_CHUNK_SIZE)
+    return _chunk_text(text, max_chars=TRANSLATION_CHUNK_SIZE)
 
 
 def _pack_chunks(parts: list[str], max_chars: int) -> list[str]:
@@ -750,12 +867,16 @@ def _stream_reasoning_delta_content(chunk_event: Any) -> str:
 
 def _english_messages(chunk: str, *, index: int, total: int, source_language: str) -> List[Dict[str, str]]:
     system = (
-        "You are a careful Indian legal document translator and editor. "
-        "Convert the provided OCR/digitized legal filing text into clear English Markdown. "
-        "Preserve headings, page labels, paragraph order, names, dates, FIR/case numbers, "
-        "legal sections, IPC references, and tables where possible. Do not add facts, analysis, "
-        "summaries, citations, or commentary. If the text is already English, clean OCR artifacts "
-        "lightly but preserve meaning."
+        "You are a precise Indian court-document translator and OCR cleanup editor. "
+        "Return the entire input in English Markdown. Translate every word written in an "
+        "Indic script, including headings, table cells, labels, witness descriptions, and "
+        "legal phrases. Transliterate proper names into Latin script; never leave Devanagari "
+        "or another Indic script in the output. Preserve page labels, paragraph numbering, "
+        "dates, FIR/CNR/case numbers, statutory section numbers, and the exact content order. "
+        "Preserve valid Markdown or HTML table structure and keep every row and column aligned. "
+        "Remove only obvious adjacent OCR duplicates. Do not summarize, omit, interpret, add "
+        "facts, citations, or commentary. Return only cleaned English Markdown without a "
+        "preface or code fence."
     )
     user = (
         f"Source language hint: {source_language}\n"
