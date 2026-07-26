@@ -515,7 +515,7 @@ def _summarize_ipc_sections(markdown: str) -> list[IpcSectionOut]:
     summaries: list[IpcSectionOut] = []
     for section in unique_sections:
         logger.info("document.ipc.summary.start section=%s", section)
-        summary = sarvam.summarize_ipc_section(section)
+        summary = sarvam.summarize_ipc_section(section) or ""
         logger.info("document.ipc.summary.done section=%s summary_chars=%s", section, len(summary))
         summaries.append(IpcSectionOut(ipc=section, summary=summary))
     return summaries

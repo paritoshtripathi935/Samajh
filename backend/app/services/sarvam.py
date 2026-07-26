@@ -803,6 +803,14 @@ def summarize_ipc_section(section: str) -> str:
         "the offence it defines, and the punishment prescribed. Be concise. "
         "Do not invent details; mention uncertainty if needed."
     )
+    return chat(
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": f"Explain IPC Section {section}."},
+        ],
+        model=IPC_SUMMARY_MODEL,
+        temperature=0.1,
+    )
 
 
 def generate_legal_search_items(
@@ -832,16 +840,41 @@ def generate_legal_search_items(
         f"Analysis section: {section_title}\n\n"
         f"Section content:\n{section_content[:8000]}"
     )
-    raw = chat(
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        model=RESEARCH_SEARCH_MODEL,
-        temperature=0.15,
-        max_tokens=1800,
-    )
-    payload = _json_from_chat(raw)
-    if not isinstance(payload, list):
-        raise SarvamError("Sarvam search response was not a JSON array")
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    failures: List[str] = []
+    for attempt, model in enumerate(dict.fromkeys((RESEARCH_SEARCH_MODEL, CHAT_MODEL)), start=1):
+        try:
+            raw = chat(
+                messages=messages,
+                model=model,
+                temperature=0.1 if attempt > 1 else 0.15,
+                max_tokens=1800,
+            )
+            payload = _json_from_chat(raw)
+            if isinstance(payload, dict):
+                payload = (
+                    payload.get("items")
+                    or payload.get("search_items")
+                    or payload.get("queries")
+                )
+            items = _normalise_search_items(payload)
+            if items:
+                return items
+            failures.append(f"{model}: no valid items")
+        except SarvamError as exc:
+            failures.append(f"{model}: {exc}")
 
+    logger.warning(
+        "sarvam.legal_search.fallback section=%r failures=%s",
+        section_title,
+        "; ".join(failures),
+    )
+    return _fallback_legal_search_items(section_title, section_content)
+
+
+def _normalise_search_items(payload: Any) -> List[Dict[str, str]]:
+    if not isinstance(payload, list):
+        return []
     allowed_kinds = {"precedent", "statute", "procedure", "evidence", "defence"}
     items: List[Dict[str, str]] = []
     for value in payload[:5]:
@@ -863,14 +896,14 @@ def generate_legal_search_items(
                 "kind": kind,
             }
         )
-    if not items:
-        raise SarvamError("Sarvam did not return any valid legal search items")
     return items
 
 
 def _json_from_chat(text: str) -> Any:
-    cleaned = text.strip()
-    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", cleaned, re.DOTALL | re.IGNORECASE)
+    if not text or not text.strip():
+        raise SarvamError("Sarvam returned an empty response for legal search items")
+    cleaned = text.lstrip("\ufeff").strip()
+    fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", cleaned, re.DOTALL | re.IGNORECASE)
     if fenced:
         cleaned = fenced.group(1)
     try:
@@ -885,14 +918,45 @@ def _json_from_chat(text: str) -> Any:
             except json.JSONDecodeError:
                 pass
         raise SarvamError("Sarvam returned invalid JSON for legal search items") from exc
-    return chat(
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": f"Explain IPC Section {section}."},
-        ],
-        model=IPC_SUMMARY_MODEL,
-        temperature=0.1,
-    )
+
+
+def _fallback_legal_search_items(section_title: str, section_content: str) -> List[Dict[str, str]]:
+    """Keep source search usable when Sarvam returns an empty/malformed completion."""
+    source = re.sub(r"[#*_`>\[\](){}|]", " ", f"{section_title} {section_content}")
+    words = re.findall(r"[A-Za-z][A-Za-z'-]{2,}", source.lower())
+    stopwords = {
+        "about", "after", "also", "analysis", "been", "being", "could", "from",
+        "have", "into", "legal", "more", "section", "that", "their", "there",
+        "these", "this", "those", "under", "upon", "were", "which", "with",
+        "would", "ipc", "indian",
+    }
+    keywords: List[str] = []
+    for word in words:
+        if word not in stopwords and word not in keywords:
+            keywords.append(word)
+        if len(keywords) == 10:
+            break
+    topic = " ".join(keywords) or section_title.strip() or "criminal allegation"
+    return [
+        {
+            "title": "Governing precedents",
+            "query": f"{topic} Supreme Court India governing test precedent",
+            "rationale": "Finds Indian decisions applying the legal issues and facts identified in this analysis.",
+            "kind": "precedent",
+        },
+        {
+            "title": "Ingredients and proof",
+            "query": f"{topic} essential ingredients burden of proof evidence Indian criminal law",
+            "rationale": "Researches the required ingredients and evidentiary burden for the identified conduct.",
+            "kind": "evidence",
+        },
+        {
+            "title": "Procedure and defences",
+            "query": f"{topic} criminal procedure available defences India",
+            "rationale": "Finds procedural requirements and defences relevant to the analysis.",
+            "kind": "procedure",
+        },
+    ]
 
 
 def _chunk_text(text: str, max_chars: int) -> List[str]:
