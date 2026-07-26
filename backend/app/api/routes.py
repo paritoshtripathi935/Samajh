@@ -13,6 +13,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app.services import extraction, sarvam, store
+from app.services.citations import extract_ipc_references
 
 router = APIRouter(prefix="/api")
 
@@ -25,9 +26,32 @@ class AskIn(BaseModel):
     question: str
 
 
+class IpcSectionOut(BaseModel):
+    ipc: str
+    summary: str
+
+
+class ProcessDocumentOut(BaseModel):
+    raw_extraction: str
+    eng_extraction: str
+    ipc_sections: list[IpcSectionOut]
+
+
 @router.post("/cases")
 def create_case(body: CreateCaseIn):
     return store.create_case(body.title)
+
+
+@router.post("/documents/process", response_model=ProcessDocumentOut)
+def process_document(
+    file: UploadFile = File(...),
+    language: str = Form("en-IN"),
+    output_format: str = Form("md"),
+):
+    """Single-call API: digitise, translate to English, and summarize IPC refs."""
+    if output_format != "md":
+        raise HTTPException(400, "single process API currently supports output_format=md only")
+    return _process_upload(file=file, language=language, output_format=output_format)
 
 
 @router.post("/cases/{case_id}/documents")
@@ -41,28 +65,19 @@ def upload_document(
     if store.get_case(case_id) is None:
         raise HTTPException(404, "case not found")
 
-    suffix = Path(file.filename or "upload.pdf").suffix or ".pdf"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(file.file.read())
-        tmp_path = tmp.name
+    processed = _process_upload(file=file, language=language, output_format=output_format)
+    raw_text = processed.raw_extraction
 
-    try:
-        result = sarvam.digitise(tmp_path, language=language, output_format=output_format)
-    except sarvam.SarvamError as e:
-        raise HTTPException(502, f"Sarvam digitise failed: {e}")
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
-
-    filing_type = extraction.detect_filing_type(result.raw_text)
+    filing_type = extraction.detect_filing_type(raw_text)
     doc = store.add_document(
         case_id,
         {
             "fileName": file.filename,
             "filingType": filing_type,
-            "jobId": result.job_id,
-            "outputFormat": result.output_format,
-            "digitisedText": result.raw_text,
-            "pageMetrics": result.page_metrics,
+            "outputFormat": output_format,
+            "digitisedText": raw_text,
+            "englishText": processed.eng_extraction,
+            "ipcSections": [section.model_dump() for section in processed.ipc_sections],
             "status": "ready",
         },
     )
@@ -72,10 +87,11 @@ def upload_document(
         "caseId": case_id,
         "fileName": doc["fileName"],
         "filingType": filing_type,
-        "jobId": result.job_id,
         "status": "ready",
-        "preview": result.raw_text[:1200],
-        "pageMetrics": result.page_metrics,
+        "preview": raw_text[:1200],
+        "raw_extraction": processed.raw_extraction,
+        "eng_extraction": processed.eng_extraction,
+        "ipc_sections": processed.ipc_sections,
     }
 
 
@@ -122,3 +138,40 @@ def _find_doc(case_id: str, document_id: str):
         if d["id"] == document_id:
             return d
     raise HTTPException(404, "document not found")
+
+
+def _process_upload(file: UploadFile, language: str, output_format: str) -> ProcessDocumentOut:
+    suffix = Path(file.filename or "upload.pdf").suffix or ".pdf"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(file.file.read())
+        tmp_path = tmp.name
+
+    try:
+        result = sarvam.digitise(tmp_path, language=language, output_format=output_format)
+        raw_extraction = result.raw_text
+        eng_extraction = sarvam.translate_to_english(raw_extraction, source_language_code=language)
+        ipc_sections = _summarize_ipc_sections(raw_extraction)
+        return ProcessDocumentOut(
+            raw_extraction=raw_extraction,
+            eng_extraction=eng_extraction,
+            ipc_sections=ipc_sections,
+        )
+    except sarvam.SarvamError as e:
+        raise HTTPException(502, f"Sarvam request failed: {e}")
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+def _summarize_ipc_sections(markdown: str) -> list[IpcSectionOut]:
+    refs = extract_ipc_references(markdown)
+    unique_sections = sorted({ref.section for ref in refs}, key=_section_sort_key)
+    return [
+        IpcSectionOut(ipc=section, summary=sarvam.summarize_ipc_section(section))
+        for section in unique_sections
+    ]
+
+
+def _section_sort_key(section: str) -> tuple[int, str]:
+    numeric = "".join(ch for ch in section if ch.isdigit())
+    suffix = "".join(ch for ch in section if not ch.isdigit())
+    return (int(numeric or 0), suffix)

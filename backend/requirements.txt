@@ -3,8 +3,10 @@ uvicorn[standard]
 pydantic
 pydantic-settings
 sarvamai>=0.1.28       # official Sarvam SDK — Document Digitization, chat, translate
+pypdf                 # split PDFs into <=10 page Sarvam DI batches
 requests
 httpx
 python-multipart      # FastAPI file uploads (UploadFile / File)
+pytest                # backend regression tests
 supabase              # supabase-py client for cases/documents/answers (M1)
 gunicorn              # production server (Render/Fly)

@@ -19,6 +19,14 @@ class Citation:
     url: str = ""       # optional deeplink back to source
 
 
+@dataclass
+class IpcReference:
+    section: str
+    raw_text: str
+    start_offset: int
+    end_offset: int
+
+
 _PATTERNS = {
     # AIR 2023 SC 1234  /  AIR 2022 Bom 567
     "air": re.compile(r"AIR\s+\d{4}\s+[A-Z][A-Za-z]+\s+\d+"),
@@ -42,6 +50,15 @@ _PATTERNS = {
 
 _CASE_TYPES = {"air", "scc", "scr", "ilr"}
 
+_IPC_PATTERN = re.compile(
+    r"(?P<raw>"
+    r"(?:(?:Section|Sec\.?|u/s|U/S|S\.?)\s*(?P<section_a>\d+[A-Z]?)\s*(?:of\s+)?(?:IPC|I\.P\.C\.))"
+    r"|"
+    r"(?:(?:IPC|I\.P\.C\.)\s*(?:Section|Sec\.?)?\s*(?P<section_b>\d+[A-Z]?))"
+    r")",
+    re.IGNORECASE,
+)
+
 
 def extract_citations(text: str) -> List[Citation]:
     """Extract all Indian legal citations from a block of text."""
@@ -60,6 +77,33 @@ def extract_citations(text: str) -> List[Citation]:
             citations.append(Citation(text=raw, citation_type=kind, url=url))
 
     return citations
+
+
+def extract_ipc_references(text: str) -> List[IpcReference]:
+    """Extract IPC section references with source offsets for UI highlighting."""
+    refs: List[IpcReference] = []
+    seen_ranges: Set[tuple[int, int]] = set()
+
+    for match in _IPC_PATTERN.finditer(text):
+        start, end = match.span()
+        if (start, end) in seen_ranges:
+            continue
+
+        section = match.group("section_a") or match.group("section_b")
+        if not section:
+            continue
+
+        refs.append(
+            IpcReference(
+                section=section.upper(),
+                raw_text=match.group("raw"),
+                start_offset=start,
+                end_offset=end,
+            )
+        )
+        seen_ranges.add((start, end))
+
+    return refs
 
 
 def extract_suggested_steps(text: str) -> List[str]:
