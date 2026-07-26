@@ -52,7 +52,7 @@ from app.core.settings import settings
 CHAT_MODEL = "sarvam-30b"          # sarvam-105b for the heavier model
 IPC_SUMMARY_MODEL = "sarvam-105b"
 CHAT_TRANSLATION_MODEL = "sarvam-105b"
-CHAT_TRANSLATION_CHUNK_SIZE = 9000
+CHAT_TRANSLATION_CHUNK_SIZE = 3000
 CHAT_TRANSLATION_MAX_TOKENS = 4096
 MAX_DI_PAGES = 10
 logger = logging.getLogger(__name__)
@@ -441,7 +441,7 @@ def generate_english_with_chat(
     translated: list[str] = []
     for index, chunk in enumerate(chunks, start=1):
         logger.info("sarvam.english_chat.chunk.start index=%s chars=%s", index, len(chunk))
-        translated.append(_english_chat_completion(chunk, index=index, total=len(chunks), source_language=source_language))
+        translated.append(_english_chat_completion_with_fallback(chunk, index=index, total=len(chunks), source_language=source_language))
         logger.info("sarvam.english_chat.chunk.done index=%s output_chars=%s", index, len(translated[-1]))
     return "\n\n".join(part.strip() for part in translated if part.strip())
 
@@ -505,6 +505,37 @@ def _english_chat_completion(chunk: str, *, index: int, total: int, source_langu
         temperature=0.0,
         max_tokens=CHAT_TRANSLATION_MAX_TOKENS,
     )
+
+
+def _english_chat_completion_with_fallback(chunk: str, *, index: int, total: int, source_language: str) -> str:
+    output = _english_chat_completion(chunk, index=index, total=total, source_language=source_language)
+    if output.strip():
+        return output
+
+    logger.warning(
+        "sarvam.english_chat.empty_chunk index=%s chars=%s retrying_with_smaller_chunks",
+        index,
+        len(chunk),
+    )
+    smaller_chunks = _chunk_text(chunk, max_chars=1200)
+    retry_outputs: list[str] = []
+    for retry_index, retry_chunk in enumerate(smaller_chunks, start=1):
+        retry_output = _english_chat_completion(
+            retry_chunk,
+            index=retry_index,
+            total=len(smaller_chunks),
+            source_language=source_language,
+        )
+        if retry_output.strip():
+            retry_outputs.append(retry_output)
+        else:
+            logger.warning(
+                "sarvam.english_chat.empty_retry original_index=%s retry_index=%s using_source_text",
+                index,
+                retry_index,
+            )
+            retry_outputs.append(retry_chunk)
+    return "\n\n".join(part.strip() for part in retry_outputs if part.strip())
 
 
 def summarize_ipc_section(section: str) -> str:
