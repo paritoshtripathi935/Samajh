@@ -767,9 +767,31 @@ def _resolve_conversation(*, document_id: str, conversation_id: Optional[str], q
 
 
 def _document_chat_context(bundle: dict[str, Any]) -> str:
-    translation = bundle.get("translations", [{}])[0].get("translated_text") if bundle.get("translations") else ""
-    raw = bundle.get("digitizations", [{}])[0].get("content") if bundle.get("digitizations") else ""
-    return (translation or raw or "")[:24000]
+    parts: list[str] = []
+
+    for translation in bundle.get("translations") or []:
+        translated_text = str(translation.get("translated_text") or "").strip()
+        if translated_text:
+            parts.append(f"ENGLISH TRANSLATION:\n{translated_text}")
+
+    for digitization in bundle.get("digitizations") or []:
+        raw = str(digitization.get("content") or "").strip()
+        if raw:
+            parts.append(f"RAW EXTRACTION:\n{raw}")
+            continue
+
+        content_json = digitization.get("content_json")
+        if isinstance(content_json, list) and content_json:
+            rebuilt = sarvam.blocks_to_markdown(content_json).strip()
+            if rebuilt:
+                parts.append(f"REBUILT PAGE EXTRACTION:\n{rebuilt}")
+
+    for extraction_row in bundle.get("extractions") or []:
+        fields = extraction_row.get("fields")
+        if isinstance(fields, dict) and fields:
+            parts.append(f"EXTRACTED LEGAL METADATA:\n{json.dumps(fields, ensure_ascii=False, indent=2)}")
+
+    return "\n\n".join(parts)[:24000]
 
 
 def _answer_document_question(
