@@ -21,5 +21,9 @@ class Settings(BaseSettings):
     # CORS origin for the Next.js frontend
     frontend_origin: str = "http://localhost:3000"
 
+    # Sarvam Document Intelligence allows limited request throughput. Keep
+    # parallel batch jobs conservative; increase only after observing rate limits.
+    sarvam_di_max_workers: int = 3
+
 
 settings = Settings()

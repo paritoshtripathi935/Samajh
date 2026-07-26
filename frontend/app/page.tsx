@@ -30,9 +30,15 @@ export default function Home() {
     setLoading(true);
     setError(null);
     try {
+      const originalPdfUrl = URL.createObjectURL(file);
       const result = await api.processDocument(file, { language });
       // Stash for an instant render on the results page (backend fetch is the
       // shareable fallback). Guard against sessionStorage quota (big scans).
+      try {
+        sessionStorage.setItem('samajh:lastPdfUrl', originalPdfUrl);
+      } catch {
+        /* browser storage unavailable */
+      }
       try {
         sessionStorage.setItem('samajh:lastResult', JSON.stringify({ ...result, fileName: file.name }));
       } catch {

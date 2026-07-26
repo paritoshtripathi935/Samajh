@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import logging
 import tempfile
+import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
@@ -43,6 +44,7 @@ class ProcessDocumentOut(BaseModel):
     raw_extraction: str
     eng_extraction: str
     ipc_sections: list[IpcSectionOut]
+    pages: Optional[list[dict[str, Any]]] = None
     # Supabase id when persistence succeeded (best-effort); null otherwise.
     document_id: Optional[str] = None
     filing_type: Optional[str] = None
@@ -57,7 +59,15 @@ def process_document(
 ):
     """Digitise (structured JSON, watermark/chrome removed), translate to
     English, summarise IPC refs, and persist (with block coords + confidence)."""
+    start = time.perf_counter()
+    logger.info(
+        "document.process.start filename=%s content_type=%s language=%s",
+        file.filename,
+        file.content_type,
+        language,
+    )
     processed, pages, job_id = _digitise_and_summarise(file=file, language=language)
+    logger.info("document.process.detect_filing_type.start raw_chars=%s", len(processed.raw_extraction))
     processed.filing_type = extraction.detect_filing_type(processed.raw_extraction)
     processed.document_id = _persist_process(
         file_name=file.filename or "upload.pdf",
@@ -66,15 +76,28 @@ def process_document(
         pages=pages,
         job_id=job_id,
     )
+    logger.info(
+        "document.process.done filename=%s document_id=%s filing_type=%s raw_chars=%s english_chars=%s ipc_count=%s elapsed_ms=%.1f",
+        file.filename,
+        processed.document_id,
+        processed.filing_type,
+        len(processed.raw_extraction),
+        len(processed.eng_extraction),
+        len(processed.ipc_sections),
+        (time.perf_counter() - start) * 1000,
+    )
     return processed
 
 
 @router.get("/documents/{document_id}")
 def get_document(document_id: str):
     """Return the persisted document with its digitizations/extractions/translations."""
+    logger.info("document.get.start document_id=%s", document_id)
     bundle = repo.get_document_bundle(document_id)
     if not bundle:
+        logger.info("document.get.not_found document_id=%s", document_id)
         raise HTTPException(404, "document not found")
+    logger.info("document.get.done document_id=%s", document_id)
     return bundle
 
 
@@ -179,36 +202,64 @@ def _digitise_and_summarise(file: UploadFile, language: str):
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(file.file.read())
         tmp_path = tmp.name
+    file_size = Path(tmp_path).stat().st_size
+    logger.info(
+        "document.upload.saved filename=%s tmp_path=%s bytes=%s",
+        file.filename,
+        tmp_path,
+        file_size,
+    )
 
     try:
         # DI job accepts md/html only; the bundle also ships per-page layout
         # JSON (blocks w/ bbox + confidence), which digitise() returns as pages.
+        logger.info("document.digitise.start filename=%s language=%s", file.filename, language)
         result = sarvam.digitise(tmp_path, language=language, output_format="md")
         pages = result.content if isinstance(result.content, list) else []
         clean_md = (
             sarvam.blocks_to_markdown(pages) if pages else sarvam.strip_data_uris(result.raw_text)
         )
+        logger.info(
+            "document.digitise.done filename=%s job_id=%s raw_chars=%s clean_chars=%s pages=%s output_files=%s",
+            file.filename,
+            result.job_id,
+            len(result.raw_text),
+            len(clean_md),
+            len(pages),
+            len(result.output_files),
+        )
+        logger.info("document.translate.start filename=%s source_language=%s clean_chars=%s", file.filename, language, len(clean_md))
         eng_extraction = sarvam.translate_to_english(clean_md, source_language_code=language)
+        logger.info("document.translate.done filename=%s english_chars=%s", file.filename, len(eng_extraction))
+        logger.info("document.ipc.start filename=%s", file.filename)
         ipc_sections = _summarize_ipc_sections(clean_md)
+        logger.info("document.ipc.done filename=%s ipc_sections=%s", file.filename, [s.ipc for s in ipc_sections])
         processed = ProcessDocumentOut(
             raw_extraction=clean_md,
             eng_extraction=eng_extraction,
             ipc_sections=ipc_sections,
+            pages=pages or None,
         )
         return processed, pages, str(result.job_id)
     except sarvam.SarvamError as e:
+        logger.exception("document.process.sarvam_error filename=%s", file.filename)
         raise HTTPException(502, f"Sarvam request failed: {e}")
     finally:
         Path(tmp_path).unlink(missing_ok=True)
+        logger.info("document.upload.cleaned tmp_path=%s", tmp_path)
 
 
 def _summarize_ipc_sections(markdown: str) -> list[IpcSectionOut]:
     refs = extract_ipc_references(markdown)
     unique_sections = sorted({ref.section for ref in refs}, key=_section_sort_key)
-    return [
-        IpcSectionOut(ipc=section, summary=sarvam.summarize_ipc_section(section))
-        for section in unique_sections
-    ]
+    logger.info("document.ipc.detected refs=%s unique_sections=%s", len(refs), unique_sections)
+    summaries: list[IpcSectionOut] = []
+    for section in unique_sections:
+        logger.info("document.ipc.summary.start section=%s", section)
+        summary = sarvam.summarize_ipc_section(section)
+        logger.info("document.ipc.summary.done section=%s summary_chars=%s", section, len(summary))
+        summaries.append(IpcSectionOut(ipc=section, summary=summary))
+    return summaries
 
 
 def _section_sort_key(section: str) -> tuple[int, str]:
@@ -229,6 +280,7 @@ def _persist_process(
     request on a DB error — the MVP demo must still return its result.
     `content` = clean text; `content_json` = DI blocks (bbox + confidence)."""
     try:
+        logger.info("document.persist.start file_name=%s filing_type=%s", file_name, processed.filing_type)
         doc = repo.insert_document(
             file_name=file_name,
             filing_type=processed.filing_type or "unknown",
@@ -258,6 +310,7 @@ def _persist_process(
                 fields={"ipc_sections": [s.model_dump() for s in processed.ipc_sections]},
                 model=sarvam.IPC_SUMMARY_MODEL,
             )
+        logger.info("document.persist.done document_id=%s", doc["id"])
         return doc["id"]
     except Exception as exc:  # noqa: BLE001 - persistence is best-effort for the MVP
         logger.warning("Supabase persistence failed (continuing without it): %s", exc)

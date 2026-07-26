@@ -6,7 +6,7 @@
  * Sarvam + Supabase; the browser never holds the Sarvam key. Point at it with
  * NEXT_PUBLIC_BACKEND_URL (default http://localhost:8000).
  */
-const BASE = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000';
+const BASE = process.env.NEXT_PUBLIC_BACKEND_URL?.trim() || 'http://localhost:8000';
 
 export class ApiError extends Error {
   constructor(message: string, readonly status: number, readonly body?: unknown) {
@@ -54,10 +54,33 @@ export interface IpcSection {
   summary: string;
 }
 
+export interface LayoutBlock {
+  text?: string;
+  bbox?: unknown;
+  bounding_box?: unknown;
+  box?: unknown;
+  layout_tag?: string;
+  confidence?: number;
+  reading_order?: number;
+  [key: string]: unknown;
+}
+
+export interface LayoutPage {
+  page_num?: number;
+  page_number?: number;
+  page?: number;
+  width?: number;
+  height?: number;
+  dimensions?: { width?: number; height?: number };
+  blocks?: LayoutBlock[];
+  [key: string]: unknown;
+}
+
 export interface ProcessResult {
   raw_extraction: string;
   eng_extraction: string;
   ipc_sections: IpcSection[];
+  pages?: LayoutPage[] | null;
   document_id: string | null;
   filing_type: string | null;
 }

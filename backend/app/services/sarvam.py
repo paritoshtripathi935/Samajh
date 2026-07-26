@@ -35,9 +35,11 @@ Verified against docs.sarvam.ai + the SDK surface (v0.1.28), 2026-07-26:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import tempfile
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -50,8 +52,11 @@ from app.core.settings import settings
 CHAT_MODEL = "sarvam-30b"          # sarvam-105b for the heavier model
 IPC_SUMMARY_MODEL = "sarvam-105b"
 TRANSLATE_MODEL = "sarvam-translate:v1"
-TRANSLATE_CHUNK_SIZE = 3500
+# Sarvam Translate rejects body.input above 2000 characters. Keep a margin for
+# Unicode/newline accounting and future SDK serialization quirks.
+TRANSLATE_CHUNK_SIZE = 1800
 MAX_DI_PAGES = 10
+logger = logging.getLogger(__name__)
 
 
 class SarvamError(Exception):
@@ -86,20 +91,67 @@ def digitise(
     """Run the full DI job on one PDF (or ZIP of JPEG/PNG) and return the
     digitised output. Blocking; call from a threadpool (sync FastAPI route)."""
     batches = _split_pdf_if_needed(file_path)
+    logger.info(
+        "sarvam.digitise.start file_path=%s batches=%s language=%s output_format=%s",
+        file_path,
+        len(batches),
+        language,
+        output_format,
+    )
     try:
         if len(batches) > 1:
-            return _merge_digitise_results(
-                [
-                    _digitise_single(batch, language, output_format, poll_interval, timeout)
-                    for batch in batches
-                ]
+            return _digitise_batches_parallel(
+                batches=batches,
+                language=language,
+                output_format=output_format,
+                poll_interval=poll_interval,
+                timeout=timeout,
             )
 
-        return _digitise_single(batches[0], language, output_format, poll_interval, timeout)
+        result = _digitise_single(batches[0], language, output_format, poll_interval, timeout)
+        logger.info("sarvam.digitise.done job_id=%s raw_chars=%s", result.job_id, len(result.raw_text))
+        return result
     finally:
         for batch in batches:
             if batch != file_path:
                 Path(batch).unlink(missing_ok=True)
+                logger.info("sarvam.digitise.batch_cleaned path=%s", batch)
+
+
+def _digitise_batches_parallel(
+    *,
+    batches: List[str],
+    language: str,
+    output_format: str,
+    poll_interval: float,
+    timeout: float,
+) -> DigitiseResult:
+    max_workers = max(1, min(settings.sarvam_di_max_workers, len(batches)))
+    logger.info(
+        "sarvam.digitise.parallel.start batches=%s workers=%s",
+        len(batches),
+        max_workers,
+    )
+
+    ordered_results: List[DigitiseResult | None] = [None] * len(batches)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_digitise_single, batch, language, output_format, poll_interval, timeout): index
+            for index, batch in enumerate(batches)
+        }
+        for future in as_completed(futures):
+            index = futures[future]
+            ordered_results[index] = future.result()
+            logger.info(
+                "sarvam.digitise.parallel.batch_done batch_index=%s job_id=%s",
+                index,
+                ordered_results[index].job_id if ordered_results[index] else "-",
+            )
+
+    results = [result for result in ordered_results if result is not None]
+    merged = _merge_digitise_results(results)
+    logger.info("sarvam.digitise.parallel.done batches=%s raw_chars=%s", len(results), len(merged.raw_text))
+    return merged
 
 
 def _digitise_single(
@@ -113,13 +165,16 @@ def _digitise_single(
     client = _client()
     job = client.document_intelligence.create_job(language=language, output_format=output_format)
     try:
+        logger.info("sarvam.di_job.upload.start path=%s", file_path)
         job.upload_file(file_path)
+        logger.info("sarvam.di_job.start job_id=%s", job.job_id)
         job.start()
         status = job.wait_until_complete(poll_interval=poll_interval, timeout=timeout)
     except Exception as exc:  # noqa: BLE001 - normalize SDK exceptions at our boundary
         raise SarvamError(str(exc)) from exc
 
     state = str(getattr(status, "job_state", "")).lower()
+    logger.info("sarvam.di_job.status job_id=%s state=%s", job.job_id, state)
     if state not in ("completed", "partiallycompleted"):
         raise SarvamError(f"DI job {job.job_id} ended in state '{state}'")
 
@@ -127,6 +182,13 @@ def _digitise_single(
     out_zip = str(Path(out_dir) / "output.zip")
     written = job.download_output(out_zip)
     raw_text, pages, files = _read_output(written or out_zip, out_dir)
+    logger.info(
+        "sarvam.di_job.output job_id=%s raw_chars=%s pages=%s files=%s",
+        job.job_id,
+        len(raw_text),
+        len(pages),
+        len(files),
+    )
 
     metrics = None
     try:
@@ -156,8 +218,10 @@ def _split_pdf_if_needed(file_path: str) -> List[str]:
 
     total_pages = len(reader.pages)
     if total_pages <= MAX_DI_PAGES:
+        logger.info("sarvam.pdf.no_split path=%s pages=%s", file_path, total_pages)
         return [file_path]
 
+    logger.info("sarvam.pdf.split path=%s pages=%s batch_size=%s", file_path, total_pages, MAX_DI_PAGES)
     batch_paths: List[str] = []
     for start in range(0, total_pages, MAX_DI_PAGES):
         writer = PdfWriter()
@@ -171,6 +235,12 @@ def _split_pdf_if_needed(file_path: str) -> List[str]:
         with tmp:
             writer.write(tmp)
         batch_paths.append(tmp.name)
+        logger.info(
+            "sarvam.pdf.batch_created path=%s page_start=%s page_end=%s",
+            tmp.name,
+            start + 1,
+            min(start + MAX_DI_PAGES, total_pages),
+        )
 
     return batch_paths
 
@@ -180,6 +250,7 @@ def _merge_digitise_results(results: List[DigitiseResult]) -> DigitiseResult:
         raise SarvamError("No digitisation results to merge")
 
     raw_text = "\n\n".join(result.raw_text for result in results if result.raw_text)
+    logger.info("sarvam.digitise.merge batches=%s raw_chars=%s", len(results), len(raw_text))
     output_files = [file for result in results for file in result.output_files]
 
     merged_pages: List[Dict[str, Any]] = []
@@ -261,12 +332,16 @@ def chat(
     max_tokens: Optional[int] = None,
 ) -> str:
     client = _client()
+    logger.info("sarvam.chat.start model=%s messages=%s", model, len(messages))
     resp = client.chat.completions(
         messages=messages, model=model, temperature=temperature, max_tokens=max_tokens
     )
     try:
-        return resp.choices[0].message.content or ""
+        content = resp.choices[0].message.content or ""
+        logger.info("sarvam.chat.done model=%s chars=%s", model, len(content))
+        return content
     except (AttributeError, IndexError):
+        logger.warning("sarvam.chat.empty_response model=%s", model)
         return ""
 
 
@@ -279,14 +354,26 @@ def translate(
     mode: str = "formal",
 ) -> str:
     client = _client()
-    resp = client.text.translate(
-        input=input_text,
-        source_language_code=source_language_code,
-        target_language_code=target_language_code,
-        model=TRANSLATE_MODEL,
-        mode=mode,
+    logger.info(
+        "sarvam.translate.start source=%s target=%s model=%s chars=%s",
+        source_language_code,
+        target_language_code,
+        TRANSLATE_MODEL,
+        len(input_text),
     )
-    return getattr(resp, "translated_text", "") or ""
+    try:
+        resp = client.text.translate(
+            input=input_text,
+            source_language_code=source_language_code,
+            target_language_code=target_language_code,
+            model=TRANSLATE_MODEL,
+            mode=mode,
+        )
+    except Exception as exc:  # noqa: BLE001 - normalize SDK exceptions at our boundary
+        raise SarvamError(str(exc)) from exc
+    translated = getattr(resp, "translated_text", "") or ""
+    logger.info("sarvam.translate.done target=%s chars=%s", target_language_code, len(translated))
+    return translated
 
 
 _DATA_URI_IMG_RE = re.compile(r"!\[[^\]]*\]\(\s*data:[^)]*\)")
@@ -372,9 +459,11 @@ def translate_to_english(input_text: str, source_language_code: str) -> str:
         return ""
     text = strip_data_uris(input_text)
     if source_language_code.lower() == "en-in":
+        logger.info("sarvam.translate.skip_english chars=%s stripped_chars=%s", len(input_text), len(text))
         return text
 
     chunks = _chunk_text(text, max_chars=TRANSLATE_CHUNK_SIZE)
+    logger.info("sarvam.translate.chunked chunks=%s stripped_chars=%s", len(chunks), len(text))
     translated = [
         translate(
             chunk,
